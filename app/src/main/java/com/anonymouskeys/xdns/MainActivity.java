@@ -1886,8 +1886,16 @@ public class MainActivity extends Activity {
                     );
 
             if (!profile.isEmpty()) {
+                String stage = prefs.getString(
+                        XDnsVpnService.KEY_LAST_START_STAGE,
+                        ""
+                );
+
                 autoResult.setText(
                         "Saved AUTO: " + profile
+                                + (stage.isEmpty()
+                                ? ""
+                                : "\nLast VPN stage: " + stage)
                 );
             }
         }

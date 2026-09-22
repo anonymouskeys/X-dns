@@ -42,8 +42,12 @@ jobs:
             https://github.com/anonymouskeys/Dragon-vpn.git \
             "$RUNNER_TEMP/dragon"
 
-          git -C "$RUNNER_TEMP/dragon" \
-            submodule update --init --depth 1 hev-socks5-tunnel
+          # Use pinned stable HEV 2.17.1. It contains Android/UDP crash
+          # fixes and matches the boolean JNI Start/Stop contract.
+          rm -rf "$RUNNER_TEMP/dragon/hev-socks5-tunnel"
+          git clone --depth 1 --branch 2.17.1 --recurse-submodules --shallow-submodules \
+            https://github.com/heiher/hev-socks5-tunnel.git \
+            "$RUNNER_TEMP/dragon/hev-socks5-tunnel"
 
           export NDK_HOME="$ANDROID_HOME/ndk/27.2.12479018"
 
@@ -74,11 +78,11 @@ jobs:
           ./gradlew clean assembleDebug --no-daemon
           mkdir -p dist
           cp app/build/outputs/apk/debug/app-debug.apk \
-            dist/X-dns-universal-v0.4.apk
+            dist/X-dns-universal-v0.4.2.apk
 
       - name: Upload universal APK
         uses: actions/upload-artifact@v4
         with:
-          name: X-dns-universal-v0.4
-          path: dist/X-dns-universal-v0.4.apk
+          name: X-dns-universal-v0.4.2
+          path: dist/X-dns-universal-v0.4.2.apk
           if-no-files-found: error

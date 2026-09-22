@@ -29,6 +29,7 @@ public class XDnsVpnService extends VpnService {
     public static final String KEY_DPI_TTL = "dpi_fake_ttl";
     public static final String KEY_DPI_STRATEGY = "dpi_strategy";
     public static final String KEY_AUTO_PROFILE = "auto_profile";
+    public static final String KEY_LAST_START_STAGE = "last_start_stage";
 
     public static final String MODE_DOH = "doh";
     public static final String MODE_DRAGON_DPI = "dragon_dpi";
@@ -224,22 +225,39 @@ public class XDnsVpnService extends VpnService {
                 "Dragon DPI • " + preset.name
         );
 
+        prefs.edit()
+                .putString(
+                        KEY_LAST_START_STAGE,
+                        "1/4 starting ciadpi: " + preset.name
+                )
+                .apply();
+
         byeDpi.start(
                 this,
                 ttl,
                 strategyId
         );
 
+        prefs.edit()
+                .putString(
+                        KEY_LAST_START_STAGE,
+                        "2/4 ciadpi OK; establishing Android TUN"
+                )
+                .apply();
+
         Builder builder = baseBuilder()
                 .setSession(
                         "X-dns • " + preset.name
                 )
-                .setMtu(8500)
-                .addAddress("10.10.10.10", 32)
+                .setMtu(HevTunnel.MTU)
+                .addAddress(
+                        HevTunnel.TUN_IPV4,
+                        HevTunnel.TUN_PREFIX
+                )
                 .addRoute("0.0.0.0", 0)
-                // HEV mapdns answers this address inside the TUN and maps
-                // domains to synthetic IPs before SOCKS/ciadpi.
-                .addDnsServer("198.18.0.2");
+                .addDnsServer(
+                        HevTunnel.MAP_DNS
+                );
 
         applyExclusions(builder, prefs);
 
@@ -247,14 +265,18 @@ public class XDnsVpnService extends VpnService {
 
         if (vpnInterface == null) {
             byeDpi.stop();
+
             throw new IllegalStateException(
                     "Android refused full DPI TUN"
             );
         }
 
-        runningMode = MODE_DRAGON_DPI;
-        runningStrategy = preset.name;
-        running = true;
+        prefs.edit()
+                .putString(
+                        KEY_LAST_START_STAGE,
+                        "3/4 Android TUN OK; starting HEV"
+                )
+                .apply();
 
         try {
             hevTunnel.start(
@@ -262,15 +284,32 @@ public class XDnsVpnService extends VpnService {
                     vpnInterface
             );
         } catch (Throwable e) {
-            running = false;
-            runningStrategy = "";
             closeVpn();
             byeDpi.stop();
+
+            prefs.edit()
+                    .putString(
+                            KEY_LAST_START_STAGE,
+                            "HEV startup failed: " + safeMessage(e)
+                    )
+                    .apply();
+
             throw e;
         }
 
+        runningMode = MODE_DRAGON_DPI;
+        runningStrategy = preset.name;
+        running = true;
+
+        prefs.edit()
+                .putString(
+                        KEY_LAST_START_STAGE,
+                        "4/4 running: " + preset.name
+                )
+                .apply();
+
         DnsLog.addRaw(
-                "DPI • full route active • "
+                "DPI • full route active ✓ • "
                         + preset.name
         );
     }
@@ -478,7 +517,8 @@ public class XDnsVpnService extends VpnService {
         if (!running
                 || !MODE_DRAGON_DPI.equals(
                 runningMode
-        )) {
+        )
+                || !HevTunnel.isRunning()) {
             return new long[]{0, 0, 0, 0};
         }
 
