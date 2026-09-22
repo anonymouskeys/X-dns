@@ -340,7 +340,7 @@ public final class AutoTuner {
 
             tested++;
 
-            if (result.ok) {
+            if (result.ok()) {
                 working = ResolverStore.working(prefs);
                 if (working.size() >= 5) return;
             }
