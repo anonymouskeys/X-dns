@@ -1,0 +1,585 @@
+package com.anonymouskeys.xdns;
+
+import android.content.SharedPreferences;
+
+import java.io.EOFException;
+import java.io.IOException;
+import java.io.InputStream;
+import java.io.OutputStream;
+import java.net.InetAddress;
+import java.net.InetSocketAddress;
+import java.net.ServerSocket;
+import java.net.Socket;
+import java.nio.charset.StandardCharsets;
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.Executors;
+import java.util.concurrent.Future;
+
+public final class SocksDohBridge {
+
+    public static final int PORT = 1081;
+
+    private final ExecutorService clients =
+            Executors.newCachedThreadPool();
+
+    private volatile boolean running;
+    private ServerSocket server;
+    private Thread acceptThread;
+    private SharedPreferences prefs;
+
+    public synchronized void start(
+            SharedPreferences prefs
+    ) throws Exception {
+
+        if (running) return;
+
+        this.prefs = prefs;
+
+        server = new ServerSocket();
+
+        server.setReuseAddress(true);
+
+        server.bind(
+                new InetSocketAddress(
+                        "127.0.0.1",
+                        PORT
+                ),
+                128
+        );
+
+        running = true;
+
+        acceptThread =
+                new Thread(
+                        this::acceptLoop,
+                        "xdns-doh-socks-bridge"
+                );
+
+        acceptThread.setDaemon(true);
+        acceptThread.start();
+
+        DnsLog.addRaw(
+                "DOH BRIDGE • listening 127.0.0.1:"
+                        + PORT
+                        + " → ciadpi:"
+                        + DragonByeDpi.PORT
+        );
+    }
+
+    public synchronized void stop() {
+        running = false;
+
+        if (server != null) {
+            try {
+                server.close();
+            } catch (Exception ignored) {
+            }
+
+            server = null;
+        }
+
+        if (acceptThread != null) {
+            acceptThread.interrupt();
+            acceptThread = null;
+        }
+
+        clients.shutdownNow();
+        FastDoh.clearCache();
+    }
+
+    private void acceptLoop() {
+        while (running) {
+            try {
+                Socket client = server.accept();
+
+                client.setTcpNoDelay(true);
+
+                clients.submit(
+                        () -> handle(client)
+                );
+
+            } catch (Exception e) {
+                if (running) {
+                    DnsLog.addRaw(
+                            "DOH BRIDGE • accept error • "
+                                    + safeMessage(e)
+                    );
+                }
+            }
+        }
+    }
+
+    private void handle(Socket client) {
+        Socket upstream = null;
+
+        try {
+            client.setSoTimeout(10_000);
+
+            Request request =
+                    readClientRequest(client);
+
+            if (request.command != 0x01) {
+                // Reject SOCKS5 UDP ASSOCIATE so QUIC fails immediately
+                // and applications fall back to HTTPS/TCP.
+                sendReply(client, 0x07);
+                return;
+            }
+
+            String ip;
+
+            if (request.addressType == 0x03) {
+                ip =
+                        FastDoh.resolveA(
+                                prefs,
+                                request.host
+                        );
+            } else {
+                ip = request.host;
+            }
+
+            upstream =
+                    connectCiadpi(
+                            ip,
+                            request.port
+                    );
+
+            sendReply(client, 0x00);
+
+            client.setSoTimeout(0);
+            upstream.setSoTimeout(0);
+
+            final Socket upstreamFinal =
+                    upstream;
+
+            Future<?> uplink =
+                    clients.submit(() ->
+                            relay(
+                                    client,
+                                    upstreamFinal
+                            )
+                    );
+
+            relay(
+                    upstreamFinal,
+                    client
+            );
+
+            uplink.cancel(true);
+
+        } catch (Exception e) {
+            try {
+                sendReply(client, 0x01);
+            } catch (Exception ignored) {
+            }
+
+            String message =
+                    safeMessage(e);
+
+            if (!message.contains("Socket closed")
+                    && !message.contains("Broken pipe")
+                    && !message.contains("Connection reset")) {
+                DnsLog.addRaw(
+                        "DOH BRIDGE • "
+                                + message
+                );
+            }
+
+        } finally {
+            closeQuietly(client);
+            closeQuietly(upstream);
+        }
+    }
+
+    private Request readClientRequest(
+            Socket socket
+    ) throws Exception {
+
+        InputStream in =
+                socket.getInputStream();
+
+        OutputStream out =
+                socket.getOutputStream();
+
+        int version = readU8(in);
+        int methodCount = readU8(in);
+
+        if (version != 0x05) {
+            throw new IOException(
+                    "SOCKS version "
+                            + version
+                            + " unsupported"
+            );
+        }
+
+        boolean noAuth = false;
+
+        for (int i = 0; i < methodCount; i++) {
+            if (readU8(in) == 0x00) {
+                noAuth = true;
+            }
+        }
+
+        if (!noAuth) {
+            out.write(
+                    new byte[]{
+                            0x05,
+                            (byte) 0xff
+                    }
+            );
+            out.flush();
+
+            throw new IOException(
+                    "SOCKS no-auth unavailable"
+            );
+        }
+
+        out.write(
+                new byte[]{
+                        0x05,
+                        0x00
+                }
+        );
+
+        out.flush();
+
+        int reqVersion = readU8(in);
+        int command = readU8(in);
+        readU8(in); // reserved
+        int atyp = readU8(in);
+
+        if (reqVersion != 0x05) {
+            throw new IOException(
+                    "Invalid SOCKS request"
+            );
+        }
+
+        String host;
+
+        if (atyp == 0x01) {
+            host =
+                    InetAddress.getByAddress(
+                            readExact(in, 4)
+                    ).getHostAddress();
+
+        } else if (atyp == 0x04) {
+            host =
+                    InetAddress.getByAddress(
+                            readExact(in, 16)
+                    ).getHostAddress();
+
+        } else if (atyp == 0x03) {
+            int len = readU8(in);
+
+            host =
+                    new String(
+                            readExact(in, len),
+                            StandardCharsets.US_ASCII
+                    );
+
+        } else {
+            throw new IOException(
+                    "SOCKS address type "
+                            + atyp
+                            + " unsupported"
+            );
+        }
+
+        int port =
+                (readU8(in) << 8)
+                        | readU8(in);
+
+        return new Request(
+                command,
+                atyp,
+                host,
+                port
+        );
+    }
+
+    private Socket connectCiadpi(
+            String ip,
+            int port
+    ) throws Exception {
+
+        Socket socket = new Socket();
+
+        socket.connect(
+                new InetSocketAddress(
+                        "127.0.0.1",
+                        DragonByeDpi.PORT
+                ),
+                1500
+        );
+
+        socket.setTcpNoDelay(true);
+        socket.setSoTimeout(10_000);
+
+        InputStream in =
+                socket.getInputStream();
+
+        OutputStream out =
+                socket.getOutputStream();
+
+        out.write(
+                new byte[]{
+                        0x05,
+                        0x01,
+                        0x00
+                }
+        );
+
+        out.flush();
+
+        byte[] greeting =
+                readExact(in, 2);
+
+        if ((greeting[0] & 0xff) != 0x05
+                || (greeting[1] & 0xff) != 0x00) {
+            closeQuietly(socket);
+
+            throw new IOException(
+                    "ciadpi SOCKS greeting failed"
+            );
+        }
+
+        byte[] address =
+                InetAddress.getByName(ip)
+                        .getAddress();
+
+        int atyp =
+                address.length == 16
+                        ? 0x04
+                        : 0x01;
+
+        byte[] request =
+                new byte[
+                        4
+                                + address.length
+                                + 2
+                        ];
+
+        request[0] = 0x05;
+        request[1] = 0x01;
+        request[2] = 0x00;
+        request[3] = (byte) atyp;
+
+        System.arraycopy(
+                address,
+                0,
+                request,
+                4,
+                address.length
+        );
+
+        request[request.length - 2] =
+                (byte) (
+                        (port >>> 8)
+                                & 0xff
+                );
+
+        request[request.length - 1] =
+                (byte) (
+                        port
+                                & 0xff
+                );
+
+        out.write(request);
+        out.flush();
+
+        byte[] reply =
+                readExact(in, 4);
+
+        if ((reply[0] & 0xff) != 0x05
+                || (reply[1] & 0xff) != 0x00) {
+            int code =
+                    reply.length > 1
+                            ? reply[1] & 0xff
+                            : -1;
+
+            closeQuietly(socket);
+
+            throw new IOException(
+                    "ciadpi CONNECT failed • code "
+                            + code
+            );
+        }
+
+        int replyType =
+                reply[3] & 0xff;
+
+        if (replyType == 0x01) {
+            readExact(in, 4);
+        } else if (replyType == 0x04) {
+            readExact(in, 16);
+        } else if (replyType == 0x03) {
+            int len = readU8(in);
+            readExact(in, len);
+        } else {
+            closeQuietly(socket);
+
+            throw new IOException(
+                    "ciadpi bad reply address"
+            );
+        }
+
+        readExact(in, 2);
+
+        return socket;
+    }
+
+    private static void sendReply(
+            Socket socket,
+            int code
+    ) throws Exception {
+
+        OutputStream out =
+                socket.getOutputStream();
+
+        out.write(
+                new byte[]{
+                        0x05,
+                        (byte) code,
+                        0x00,
+                        0x01,
+                        0x00,
+                        0x00,
+                        0x00,
+                        0x00,
+                        0x00,
+                        0x00
+                }
+        );
+
+        out.flush();
+    }
+
+    private static void relay(
+            Socket from,
+            Socket to
+    ) {
+        byte[] buffer =
+                new byte[32 * 1024];
+
+        try {
+            InputStream in =
+                    from.getInputStream();
+
+            OutputStream out =
+                    to.getOutputStream();
+
+            while (!Thread.currentThread()
+                    .isInterrupted()) {
+
+                int n =
+                        in.read(buffer);
+
+                if (n < 0) break;
+
+                if (n == 0) continue;
+
+                out.write(
+                        buffer,
+                        0,
+                        n
+                );
+
+                out.flush();
+            }
+
+        } catch (Exception ignored) {
+        }
+
+        try {
+            to.shutdownOutput();
+        } catch (Exception ignored) {
+        }
+    }
+
+    private static int readU8(
+            InputStream in
+    ) throws Exception {
+
+        int value = in.read();
+
+        if (value < 0) {
+            throw new EOFException(
+                    "Unexpected SOCKS EOF"
+            );
+        }
+
+        return value;
+    }
+
+    private static byte[] readExact(
+            InputStream in,
+            int size
+    ) throws Exception {
+
+        byte[] data =
+                new byte[size];
+
+        int offset = 0;
+
+        while (offset < size) {
+            int n =
+                    in.read(
+                            data,
+                            offset,
+                            size - offset
+                    );
+
+            if (n < 0) {
+                throw new EOFException(
+                        "Unexpected SOCKS EOF"
+                );
+            }
+
+            offset += n;
+        }
+
+        return data;
+    }
+
+    private static void closeQuietly(
+            Socket socket
+    ) {
+        if (socket == null) return;
+
+        try {
+            socket.close();
+        } catch (Exception ignored) {
+        }
+    }
+
+    private static String safeMessage(
+            Exception e
+    ) {
+        String message =
+                e.getMessage();
+
+        return message == null
+                || message.trim().isEmpty()
+                ? e.getClass()
+                .getSimpleName()
+                : message;
+    }
+
+    private static final class Request {
+        final int command;
+        final int addressType;
+        final String host;
+        final int port;
+
+        Request(
+                int command,
+                int addressType,
+                String host,
+                int port
+        ) {
+            this.command = command;
+            this.addressType = addressType;
+            this.host = host;
+            this.port = port;
+        }
+    }
+}

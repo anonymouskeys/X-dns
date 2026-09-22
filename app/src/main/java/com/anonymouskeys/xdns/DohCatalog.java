@@ -15,7 +15,6 @@ import okhttp3.ResponseBody;
 
 public final class DohCatalog {
 
-    // curl's public DoH wiki is a maintained, public list.
     public static final String CURL_WIKI_RAW =
             "https://raw.githubusercontent.com/wiki/curl/curl/DNS-over-HTTPS.md";
 
@@ -27,53 +26,115 @@ public final class DohCatalog {
                     .build();
 
     private static final Pattern URL =
-            Pattern.compile("https://[A-Za-z0-9._~-]+(?::[0-9]+)?(?:/[A-Za-z0-9._~!$&'()*+,;=:@%/-]*)?");
+            Pattern.compile(
+                    "https://[A-Za-z0-9._~-]+(?::[0-9]+)?"
+                            + "(?:/[A-Za-z0-9._~!$&'()*+,;=:@%/?#-]*)?"
+            );
 
     private DohCatalog() {}
 
-    public static List<String> fetchPublicDohUrls() throws Exception {
-        Request request = new Request.Builder()
-                .url(CURL_WIKI_RAW)
-                .header("User-Agent", "X-dns/0.2.1")
-                .get()
-                .build();
+    public static List<String> fetchPublicDohUrls()
+            throws Exception {
 
-        try (Response response = CLIENT.newCall(request).execute()) {
+        Request request =
+                new Request.Builder()
+                        .url(CURL_WIKI_RAW)
+                        .header(
+                                "User-Agent",
+                                "X-dns/0.5"
+                        )
+                        .get()
+                        .build();
+
+        try (Response response =
+                     CLIENT.newCall(
+                             request
+                     ).execute()) {
+
             if (!response.isSuccessful()) {
-                throw new IllegalStateException("Catalog HTTP " + response.code());
+                throw new IllegalStateException(
+                        "Catalog HTTP "
+                                + response.code()
+                );
             }
 
-            ResponseBody body = response.body();
-            if (body == null) throw new IllegalStateException("Empty catalog");
+            ResponseBody body =
+                    response.body();
 
-            String markdown = body.string();
-            Set<String> unique = new LinkedHashSet<>();
+            if (body == null) {
+                throw new IllegalStateException(
+                        "Empty catalog"
+                );
+            }
 
-            Matcher matcher = URL.matcher(markdown);
-            while (matcher.find()) {
-                String url = cleanup(matcher.group());
+            String markdown =
+                    body.string();
 
-                // Keep likely DoH endpoints. False positives are still harmless
-                // because the app tests an endpoint before it is selected.
-                String low = url.toLowerCase(java.util.Locale.ROOT);
-                if (low.contains("/dns-query")
-                        || low.contains("/doh/")
-                        || low.contains("freedns.controld.com/")) {
-                    unique.add(url);
+            Set<String> unique =
+                    new LinkedHashSet<>();
+
+            for (String line
+                    : markdown.split("\\r?\\n")) {
+
+                if (!line.contains("|")
+                        || !line.contains("https://")) {
+                    continue;
+                }
+
+                String[] columns =
+                        line.split("\\|", -1);
+
+                // In the curl wiki table the public DoH base URL is the
+                // second content column. Do not scrape the provider's website
+                // link from the first column.
+                int baseIndex =
+                        line.startsWith("|")
+                                ? 2
+                                : 1;
+
+                if (baseIndex >= columns.length) {
+                    continue;
+                }
+
+                Matcher matcher =
+                        URL.matcher(
+                                columns[baseIndex]
+                        );
+
+                while (matcher.find()) {
+                    String url =
+                            cleanup(
+                                    matcher.group()
+                            );
+
+                    if (url.startsWith("https://")) {
+                        unique.add(url);
+                    }
                 }
             }
 
-            return new ArrayList<>(unique);
+            return new ArrayList<>(
+                    unique
+            );
         }
     }
 
-    private static String cleanup(String url) {
+    private static String cleanup(
+            String url
+    ) {
         while (url.endsWith(".")
                 || url.endsWith(",")
                 || url.endsWith(";")
-                || url.endsWith(")")) {
-            url = url.substring(0, url.length() - 1);
+                || url.endsWith(")")
+                || url.endsWith(">")) {
+
+            url =
+                    url.substring(
+                            0,
+                            url.length() - 1
+                    );
         }
+
         return url;
     }
 }

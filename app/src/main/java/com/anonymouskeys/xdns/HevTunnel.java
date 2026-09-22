@@ -30,7 +30,7 @@ public final class HevTunnel {
                 "  icmp: 'off'\n" +
                 "socks5:\n" +
                 "  address: 127.0.0.1\n" +
-                "  port: " + DragonByeDpi.PORT + "\n" +
+                "  port: " + SocksDohBridge.PORT + "\n" +
                 "  udp: 'udp'\n" +
                 "mapdns:\n" +
                 "  address: " + MAP_DNS + "\n" +
@@ -65,7 +65,7 @@ public final class HevTunnel {
         }
 
         DnsLog.addRaw(
-                "DPI • HEV start • "
+                "DPI • HEV start via DoH bridge • "
                         + TUN_IPV4 + "/" + TUN_PREFIX
                         + " • MTU " + MTU
                         + " • mapdns " + MAP_DNS

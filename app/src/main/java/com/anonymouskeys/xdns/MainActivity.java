@@ -148,6 +148,10 @@ public class MainActivity extends Activity {
 
         updateUi();
         handler.post(uiTicker);
+
+        // Fresh install: populate the maintained public DoH catalog
+        // automatically. Existing saved entries remain available immediately.
+        refreshPublicCatalogSilently();
     }
 
     @Override
@@ -207,7 +211,7 @@ public class MainActivity extends Activity {
 
         TextView subtitle =
                 text(
-                        "AUTO DoH + Dragon DPI • v0.4",
+                        "AUTO DoH + Dragon DPI • v0.5",
                         15,
                         Color.rgb(170, 174, 185)
                 );
@@ -758,14 +762,80 @@ public class MainActivity extends Activity {
         optionUrls.clear();
         optionLabels.clear();
 
+        // Built-ins first.
         for (Map.Entry<String, String> entry
                 : BUILTIN_DOH.entrySet()) {
-            addResolverOption(
-                    entry.getKey(),
-                    entry.getValue()
-            );
+            if (!optionUrls.contains(entry.getValue())) {
+                addResolverOption(
+                        entry.getKey(),
+                        entry.getValue()
+                );
+            }
         }
 
+        // Then every resolver in the persistent database: working, untested
+        // and failed. This is the full public catalog after background import.
+        ArrayList<ResolverStore.Entry> all =
+                new ArrayList<>(
+                        ResolverStore.all(prefs)
+                );
+
+        all.sort((a, b) -> {
+            int ra = ResolverStore.OK.equals(a.status)
+                    ? 0
+                    : ResolverStore.UNKNOWN.equals(a.status)
+                    ? 1
+                    : 2;
+
+            int rb = ResolverStore.OK.equals(b.status)
+                    ? 0
+                    : ResolverStore.UNKNOWN.equals(b.status)
+                    ? 1
+                    : 2;
+
+            if (ra != rb) {
+                return Integer.compare(ra, rb);
+            }
+
+            if (ra == 0) {
+                int latency =
+                        Long.compare(
+                                a.latencyMs,
+                                b.latencyMs
+                        );
+
+                if (latency != 0) {
+                    return latency;
+                }
+            }
+
+            String an =
+                    a.name == null
+                            ? a.url
+                            : a.name;
+
+            String bn =
+                    b.name == null
+                            ? b.url
+                            : b.name;
+
+            return an.compareToIgnoreCase(bn);
+        });
+
+        for (ResolverStore.Entry entry : all) {
+            if (entry.url != null
+                    && !optionUrls.contains(entry.url)) {
+                addResolverOption(
+                        entry.name == null
+                                || entry.name.isEmpty()
+                                ? "Public DoH"
+                                : entry.name,
+                        entry.url
+                );
+            }
+        }
+
+        // Preserve manually added URLs even if they are not in the catalog.
         Set<String> customs =
                 new LinkedHashSet<>(
                         prefs.getStringSet(
@@ -774,31 +844,23 @@ public class MainActivity extends Activity {
                         )
                 );
 
-        for (ResolverStore.Entry e
-                : ResolverStore.working(prefs)) {
-            if (!BUILTIN_DOH
-                    .containsValue(e.url)) {
-                customs.add(e.url);
-            }
-        }
-
-        ArrayList<String> sorted =
+        ArrayList<String> sortedCustom =
                 new ArrayList<>(customs);
 
-        Collections.sort(sorted);
+        Collections.sort(sortedCustom);
 
-        for (String url : sorted) {
+        for (String url : sortedCustom) {
             if (!optionUrls.contains(url)) {
-                ResolverStore.Entry e =
+                ResolverStore.Entry entry =
                         ResolverStore.get(
                                 prefs,
                                 url
                         );
 
                 addResolverOption(
-                        e == null
+                        entry == null
                                 ? "Custom"
-                                : e.name,
+                                : entry.name,
                         url
                 );
             }
@@ -845,12 +907,11 @@ public class MainActivity extends Activity {
                             prefs.edit()
                                     .putString(
                                             XDnsVpnService.KEY_DOH_URL,
-                                            optionUrls.get(
-                                                    position
-                                            )
+                                            optionUrls.get(position)
                                     )
                                     .apply();
 
+                            FastDoh.clearCache();
                             updateUi();
                         }
                     }
@@ -972,6 +1033,17 @@ public class MainActivity extends Activity {
                     loadDohOptions();
                     loadStrategies();
                     loadMode();
+
+                    Toast.makeText(
+                            this,
+                            "AUTO profile found. Starting Dragon DPI…",
+                            Toast.LENGTH_LONG
+                    ).show();
+
+                    handler.postDelayed(
+                            this::requestVpn,
+                            350
+                    );
 
                 } else {
                     autoResult.setText(
@@ -1260,6 +1332,57 @@ public class MainActivity extends Activity {
                 }
             });
         }
+    }
+
+    private void refreshPublicCatalogSilently() {
+        new Thread(() -> {
+            try {
+                List<String> urls =
+                        DohCatalog.fetchPublicDohUrls();
+
+                int added = 0;
+
+                for (String url : urls) {
+                    ResolverStore.Entry before =
+                            ResolverStore.get(
+                                    prefs,
+                                    url
+                            );
+
+                    ResolverStore.rememberDiscovered(
+                            prefs,
+                            url
+                    );
+
+                    if (before == null) {
+                        added++;
+                    }
+                }
+
+                final int imported = added;
+
+                runOnUiThread(() -> {
+                    loadDohOptions();
+
+                    if (imported > 0) {
+                        testResult.setText(
+                                "Public DoH catalog: "
+                                        + urls.size()
+                                        + " saved • "
+                                        + imported
+                                        + " new"
+                        );
+                    }
+                });
+
+            } catch (Exception e) {
+                // Keep the already saved offline catalog. No popup on startup.
+                DnsLog.addRaw(
+                        "CATALOG • background refresh failed • "
+                                + safeMessage(e)
+                );
+            }
+        }, "xdns-catalog-refresh").start();
     }
 
     private void discoverAndTest() {

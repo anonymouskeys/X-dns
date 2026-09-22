@@ -59,6 +59,7 @@ public class XDnsVpnService extends VpnService {
     private Thread tunThread;
 
     private DragonByeDpi byeDpi;
+    private SocksDohBridge dohBridge;
     private HevTunnel hevTunnel;
 
     public static boolean isRunning() {
@@ -79,6 +80,7 @@ public class XDnsVpnService extends VpnService {
 
         dohPool = Executors.newFixedThreadPool(4);
         byeDpi = new DragonByeDpi();
+        dohBridge = new SocksDohBridge();
         hevTunnel = new HevTunnel();
 
         createNotificationChannel();
@@ -243,8 +245,14 @@ public class XDnsVpnService extends VpnService {
                 this,
                 ttl,
                 strategyId,
-                forceTcp
+                true
         );
+
+        // HEV sends SOCKS domain requests here. The bridge resolves those
+        // domains through the selected/fast DoH pool, then forwards the
+        // connection to ciadpi by IP. This keeps ISP/system DNS out of the
+        // Dragon path.
+        dohBridge.start(prefs);
 
         prefs.edit()
                 .putString(
@@ -272,6 +280,7 @@ public class XDnsVpnService extends VpnService {
         vpnInterface = builder.establish();
 
         if (vpnInterface == null) {
+            dohBridge.stop();
             byeDpi.stop();
 
             throw new IllegalStateException(
@@ -293,6 +302,7 @@ public class XDnsVpnService extends VpnService {
             );
         } catch (Throwable e) {
             closeVpn();
+            dohBridge.stop();
             byeDpi.stop();
 
             prefs.edit()
@@ -441,11 +451,17 @@ public class XDnsVpnService extends VpnService {
                         DEFAULT_DOH
                 );
 
-        DohClient.Result result =
-                DohClient.query(
-                        dohUrl,
+        FastDoh.RaceResult raced =
+                FastDoh.query(
+                        getSharedPreferences(
+                                PREFS,
+                                MODE_PRIVATE
+                        ),
                         request.dns
                 );
+
+        DohClient.Result result =
+                raced.result;
 
         try {
             if (result.ok()) {
@@ -544,6 +560,13 @@ public class XDnsVpnService extends VpnService {
         try {
             if (hevTunnel != null) {
                 hevTunnel.stop();
+            }
+        } catch (Throwable ignored) {
+        }
+
+        try {
+            if (dohBridge != null) {
+                dohBridge.stop();
             }
         } catch (Throwable ignored) {
         }

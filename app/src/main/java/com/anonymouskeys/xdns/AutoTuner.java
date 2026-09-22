@@ -1,6 +1,7 @@
 package com.anonymouskeys.xdns;
 
 import android.content.Context;
+import android.content.Intent;
 import android.content.SharedPreferences;
 
 import java.util.ArrayList;
@@ -86,8 +87,40 @@ public final class AutoTuner {
             Listener listener
     ) {
         if (XDnsVpnService.isRunning()) {
-            return fail("Stop X-dns before AUTO tuning");
+            Intent stop =
+                    new Intent(
+                            context,
+                            XDnsVpnService.class
+                    );
+
+            stop.setAction(
+                    XDnsVpnService.ACTION_STOP
+            );
+
+            context.startService(stop);
+
+            long deadline =
+                    System.currentTimeMillis()
+                            + 3000;
+
+            while (XDnsVpnService.isRunning()
+                    && System.currentTimeMillis()
+                    < deadline) {
+                try {
+                    Thread.sleep(100);
+                } catch (InterruptedException e) {
+                    Thread.currentThread().interrupt();
+                    return fail("AUTO interrupted while stopping VPN");
+                }
+            }
+
+            if (XDnsVpnService.isRunning()) {
+                return fail("Could not stop current X-dns VPN");
+            }
         }
+
+        DnsLog.beginSession("AUTO tuner");
+        FastDoh.clearCache();
 
         progress(listener, "AUTO • loading resolver database");
 
@@ -102,7 +135,7 @@ public final class AutoTuner {
         }
 
         // Re-benchmark the current best five with 3 real DNS queries.
-        int benchmarkCount = Math.min(5, working.size());
+        int benchmarkCount = Math.min(12, working.size());
 
         for (int i = 0; i < benchmarkCount; i++) {
             ResolverStore.Entry entry = working.get(i);
@@ -123,7 +156,7 @@ public final class AutoTuner {
             return fail("DoH candidates failed 3-probe benchmark");
         }
 
-        int resolverCount = Math.min(3, working.size());
+        int resolverCount = Math.min(5, working.size());
 
         List<DpiStrategies.Preset> strategies =
                 DpiStrategies.candidates(fakeTtl);
@@ -183,7 +216,9 @@ public final class AutoTuner {
                                         + resolver.name
                                         + " + "
                                         + strategy.name
-                                        + " • YouTube "
+                                        + " • YouTube stack "
+                                        + probe.hostsOk
+                                        + "/4 • "
                                         + probe.latencyMs
                                         + " ms"
                         );
