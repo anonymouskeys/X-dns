@@ -5,8 +5,6 @@ import android.content.Context;
 import java.io.BufferedReader;
 import java.io.File;
 import java.io.InputStreamReader;
-import java.net.InetSocketAddress;
-import java.net.Socket;
 import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.List;
@@ -82,15 +80,19 @@ public final class DragonByeDpi {
         logThread.setDaemon(true);
         logThread.start();
 
-        if (!waitForPort(created, 3500)) {
+        // Do not probe the SOCKS port with a bare TCP connect here.
+        // AUTO's first real connection performs a complete SOCKS5 handshake.
+        Thread.sleep(250);
+
+        if (!created.isAlive()) {
             stop();
             throw new IllegalStateException(
-                    "ciadpi did not open 127.0.0.1:" + PORT
+                    "ciadpi exited immediately for " + preset.name
             );
         }
 
         DnsLog.addRaw(
-                "DPI • " + preset.name + " ready on 127.0.0.1:" + PORT
+                "DPI • " + preset.name + " process alive; SOCKS probe next"
         );
     }
 
@@ -120,28 +122,5 @@ public final class DragonByeDpi {
         }
     }
 
-    private static boolean waitForPort(Process process, long timeoutMs) {
-        long end = System.currentTimeMillis() + timeoutMs;
 
-        while (System.currentTimeMillis() < end) {
-            if (!process.isAlive()) return false;
-
-            try (Socket socket = new Socket()) {
-                socket.connect(
-                        new InetSocketAddress("127.0.0.1", PORT),
-                        180
-                );
-                return true;
-            } catch (Exception ignored) {
-                try {
-                    Thread.sleep(80);
-                } catch (InterruptedException e) {
-                    Thread.currentThread().interrupt();
-                    return false;
-                }
-            }
-        }
-
-        return false;
-    }
 }
