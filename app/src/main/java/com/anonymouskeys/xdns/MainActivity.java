@@ -211,7 +211,7 @@ public class MainActivity extends Activity {
 
         TextView subtitle =
                 text(
-                        "AUTO DoH + Dragon DPI • v0.5",
+                        "AUTO DoH + Dragon DPI • v0.5.1",
                         15,
                         Color.rgb(170, 174, 185)
                 );

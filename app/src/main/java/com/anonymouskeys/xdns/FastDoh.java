@@ -4,6 +4,7 @@ import android.content.SharedPreferences;
 
 import java.net.URI;
 import java.util.ArrayList;
+import java.util.Collections;
 import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Locale;
@@ -19,13 +20,15 @@ import java.util.concurrent.TimeUnit;
 public final class FastDoh {
 
     private static final int RACE_COUNT = 3;
-    private static final long RACE_TIMEOUT_MS = 3500;
-    private static final long CACHE_TTL_MS = 120_000;
+    private static final int RESOLVE_COUNT = 5;
+    private static final long RACE_TIMEOUT_MS = 2500;
+    private static final long RESOLVE_TIMEOUT_MS = 2200;
+    private static final long CACHE_TTL_MS = 60_000;
 
     private static final ExecutorService POOL =
-            Executors.newFixedThreadPool(6);
+            Executors.newFixedThreadPool(8);
 
-    private static final ConcurrentHashMap<String, CacheEntry> A_CACHE =
+    private static final ConcurrentHashMap<String, CacheEntry> ADDRESS_CACHE =
             new ConcurrentHashMap<>();
 
     private FastDoh() {}
@@ -41,12 +44,24 @@ public final class FastDoh {
     }
 
     private static final class CacheEntry {
-        final String ip;
+        final List<String> addresses;
         final long expiresAt;
 
-        CacheEntry(String ip, long expiresAt) {
-            this.ip = ip;
+        CacheEntry(List<String> addresses, long expiresAt) {
+            this.addresses = Collections.unmodifiableList(
+                    new ArrayList<>(addresses)
+            );
             this.expiresAt = expiresAt;
+        }
+    }
+
+    private static final class ResolveResult {
+        final String endpoint;
+        final DohClient.Result result;
+
+        ResolveResult(String endpoint, DohClient.Result result) {
+            this.endpoint = endpoint;
+            this.result = result;
         }
     }
 
@@ -57,16 +72,13 @@ public final class FastDoh {
         List<String> urls = candidateUrls(prefs);
 
         if (urls.isEmpty()) {
-            DohClient.Result result =
+            return new RaceResult(
                     new DohClient.Result(
-                            null,
-                            0,
-                            -1,
-                            "RACE",
+                            null, 0, -1, "RACE",
                             "No DoH resolvers available"
-                    );
-
-            return new RaceResult(result, "");
+                    ),
+                    ""
+            );
         }
 
         int count = Math.min(RACE_COUNT, urls.size());
@@ -74,8 +86,7 @@ public final class FastDoh {
         CompletionService<RaceResult> completion =
                 new ExecutorCompletionService<>(POOL);
 
-        List<Future<RaceResult>> futures =
-                new ArrayList<>();
+        List<Future<RaceResult>> futures = new ArrayList<>();
 
         for (int i = 0; i < count; i++) {
             String endpoint = urls.get(i);
@@ -83,45 +94,32 @@ public final class FastDoh {
             futures.add(
                     completion.submit(() ->
                             new RaceResult(
-                                    DohClient.query(
-                                            endpoint,
-                                            dnsMessage
-                                    ),
+                                    DohClient.query(endpoint, dnsMessage),
                                     endpoint
                             )
                     )
             );
         }
 
-        long deadline =
-                System.currentTimeMillis()
-                        + RACE_TIMEOUT_MS;
-
+        long deadline = System.currentTimeMillis() + RACE_TIMEOUT_MS;
         RaceResult bestError = null;
         int received = 0;
 
         try {
             while (received < count) {
-                long left =
-                        deadline
-                                - System.currentTimeMillis();
-
+                long left = deadline - System.currentTimeMillis();
                 if (left <= 0) break;
 
                 Future<RaceResult> future =
-                        completion.poll(
-                                left,
-                                TimeUnit.MILLISECONDS
-                        );
+                        completion.poll(left, TimeUnit.MILLISECONDS);
 
                 if (future == null) break;
 
                 received++;
-
                 RaceResult value = future.get();
 
                 if (value.result.ok()) {
-                    cancelAll(futures);
+                    cancelRace(futures);
                     return value;
                 }
 
@@ -134,14 +132,14 @@ public final class FastDoh {
 
         } catch (Exception ignored) {
         } finally {
-            cancelAll(futures);
+            cancelRace(futures);
         }
 
         if (bestError != null) {
             return bestError;
         }
 
-        DohClient.Result timeout =
+        return new RaceResult(
                 new DohClient.Result(
                         null,
                         RACE_TIMEOUT_MS,
@@ -150,91 +148,131 @@ public final class FastDoh {
                         "No DoH reply within "
                                 + RACE_TIMEOUT_MS
                                 + " ms"
-                );
-
-        return new RaceResult(
-                timeout,
+                ),
                 urls.get(0)
         );
     }
 
-    public static String resolveA(
+    public static List<String> resolveCandidates(
             SharedPreferences prefs,
             String host
     ) throws Exception {
 
-        String key =
-                host.toLowerCase(Locale.ROOT);
+        String key = host.toLowerCase(Locale.ROOT);
+        long now = System.currentTimeMillis();
 
-        CacheEntry cached =
-                A_CACHE.get(key);
-
-        long now =
-                System.currentTimeMillis();
+        CacheEntry cached = ADDRESS_CACHE.get(key);
 
         if (cached != null
-                && cached.expiresAt > now) {
-            return cached.ip;
+                && cached.expiresAt > now
+                && !cached.addresses.isEmpty()) {
+            return new ArrayList<>(cached.addresses);
         }
 
-        RaceResult raced =
-                query(
-                        prefs,
-                        DohClient.makeTestQuery(host)
-                );
+        List<String> urls = candidateUrls(prefs);
 
-        if (!raced.result.ok()) {
-            throw new IllegalStateException(
-                    "DoH failed for "
-                            + host
-                            + ": "
-                            + (raced.result.error == null
-                            ? "unknown error"
-                            : raced.result.error)
+        if (urls.isEmpty()) {
+            throw new IllegalStateException("No DoH resolvers available");
+        }
+
+        int count = Math.min(RESOLVE_COUNT, urls.size());
+
+        CompletionService<ResolveResult> completion =
+                new ExecutorCompletionService<>(POOL);
+
+        List<Future<ResolveResult>> futures = new ArrayList<>();
+
+        for (int i = 0; i < count; i++) {
+            String endpoint = urls.get(i);
+
+            futures.add(
+                    completion.submit(() ->
+                            new ResolveResult(
+                                    endpoint,
+                                    DohClient.query(
+                                            endpoint,
+                                            DohClient.makeTestQuery(host)
+                                    )
+                            )
+                    )
             );
         }
 
-        String ip =
-                DnsPacket.firstAddress(
-                        raced.result.body
-                );
+        Set<String> addresses = new LinkedHashSet<>();
+        long deadline = System.currentTimeMillis() + RESOLVE_TIMEOUT_MS;
+        int received = 0;
 
-        if (ip == null
-                || ip.isEmpty()
-                || "-".equals(ip)) {
+        try {
+            while (received < count) {
+                long left = deadline - System.currentTimeMillis();
+                if (left <= 0) break;
+
+                Future<ResolveResult> future =
+                        completion.poll(left, TimeUnit.MILLISECONDS);
+
+                if (future == null) break;
+
+                ResolveResult value = future.get();
+                received++;
+
+                if (!value.result.ok()) {
+                    continue;
+                }
+
+                List<String> fromResponse =
+                        DnsPacket.allIpv4Addresses(
+                                value.result.body
+                        );
+
+                if (!fromResponse.isEmpty()) {
+                    addresses.addAll(fromResponse);
+
+                    DnsLog.addRaw(
+                            "DOH • "
+                                    + host
+                                    + " • "
+                                    + hostOf(value.endpoint)
+                                    + " • "
+                                    + fromResponse.size()
+                                    + " A • "
+                                    + value.result.latencyMs
+                                    + " ms"
+                    );
+                }
+
+                if (addresses.size() >= 6
+                        && received >= 2) {
+                    break;
+                }
+            }
+
+        } finally {
+            cancelResolve(futures);
+        }
+
+        if (addresses.isEmpty()) {
             throw new IllegalStateException(
-                    "No A answer for " + host
+                    "No IPv4 DoH answer for " + host
             );
         }
 
-        A_CACHE.put(
+        List<String> result = new ArrayList<>(addresses);
+
+        ADDRESS_CACHE.put(
                 key,
                 new CacheEntry(
-                        ip,
+                        result,
                         now + CACHE_TTL_MS
                 )
         );
 
-        DnsLog.addRaw(
-                "DOH BRIDGE • "
-                        + host
-                        + " → "
-                        + ip
-                        + " • "
-                        + hostOf(raced.endpoint)
-                        + " • "
-                        + raced.result.latencyMs
-                        + " ms"
-        );
-
-        return ip;
+        return result;
     }
 
     public static List<String> candidateUrls(
             SharedPreferences prefs
     ) {
-        Set<String> unique =
-                new LinkedHashSet<>();
+        Set<String> unique = new LinkedHashSet<>();
 
         String selected =
                 prefs.getString(
@@ -249,27 +287,39 @@ public final class FastDoh {
 
         for (ResolverStore.Entry entry
                 : ResolverStore.working(prefs)) {
+
             if (entry.url != null
                     && entry.url.startsWith("https://")) {
                 unique.add(entry.url);
             }
 
-            if (unique.size() >= 8) break;
+            if (unique.size() >= 10) {
+                break;
+            }
         }
 
         return new ArrayList<>(unique);
     }
 
     public static void clearCache() {
-        A_CACHE.clear();
+        ADDRESS_CACHE.clear();
     }
 
-    private static void cancelAll(
+    private static void cancelRace(
             List<Future<RaceResult>> futures
     ) {
         for (Future<RaceResult> future : futures) {
-            if (future != null
-                    && !future.isDone()) {
+            if (future != null && !future.isDone()) {
+                future.cancel(true);
+            }
+        }
+    }
+
+    private static void cancelResolve(
+            List<Future<ResolveResult>> futures
+    ) {
+        for (Future<ResolveResult> future : futures) {
+            if (future != null && !future.isDone()) {
                 future.cancel(true);
             }
         }
@@ -277,12 +327,8 @@ public final class FastDoh {
 
     private static String hostOf(String url) {
         try {
-            String host =
-                    URI.create(url).getHost();
-
-            return host == null
-                    ? url
-                    : host;
+            String host = URI.create(url).getHost();
+            return host == null ? url : host;
         } catch (Exception e) {
             return url;
         }

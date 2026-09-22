@@ -119,37 +119,125 @@ public final class SocksDohBridge {
                     readClientRequest(client);
 
             if (request.command != 0x01) {
-                // Reject SOCKS5 UDP ASSOCIATE so QUIC fails immediately
-                // and applications fall back to HTTPS/TCP.
                 sendReply(client, 0x07);
                 return;
             }
 
-            String ip;
+            List<String> candidates;
 
             if (request.addressType == 0x03) {
-                ip =
-                        FastDoh.resolveA(
+                candidates =
+                        FastDoh.resolveCandidates(
                                 prefs,
                                 request.host
                         );
             } else {
-                ip = request.host;
+                candidates =
+                        Collections.singletonList(
+                                request.host
+                        );
             }
 
-            upstream =
-                    connectCiadpi(
-                            ip,
-                            request.port
+            Exception last = null;
+            String connectedIp = null;
+
+            int maxTries =
+                    Math.min(
+                            8,
+                            candidates.size()
                     );
+
+            for (int i = 0; i < maxTries; i++) {
+                String ip = candidates.get(i);
+
+                try {
+                    upstream =
+                            connectCiadpi(
+                                    ip,
+                                    request.port
+                            );
+
+                    connectedIp = ip;
+                    break;
+
+                } catch (Exception e) {
+                    last = e;
+
+                    DnsLog.addRaw(
+                            "ROUTE RETRY • "
+                                    + request.host
+                                    + ":"
+                                    + request.port
+                                    + " • "
+                                    + ip
+                                    + " • "
+                                    + safeMessage(e)
+                    );
+                }
+            }
+
+            if (upstream == null
+                    && request.port != 443) {
+
+                for (int i = 0; i < maxTries; i++) {
+                    String ip = candidates.get(i);
+
+                    try {
+                        upstream =
+                                connectDirect(
+                                        ip,
+                                        request.port
+                                );
+
+                        connectedIp = ip;
+
+                        DnsLog.addRaw(
+                                "DIRECT FALLBACK • "
+                                        + request.host
+                                        + ":"
+                                        + request.port
+                                        + " → "
+                                        + ip
+                        );
+
+                        break;
+
+                    } catch (Exception e) {
+                        last = e;
+                    }
+                }
+            }
+
+            if (upstream == null) {
+                throw new IOException(
+                        "all "
+                                + maxTries
+                                + " IPs failed • "
+                                + request.host
+                                + ":"
+                                + request.port
+                                + " • "
+                                + (last == null
+                                ? "unknown"
+                                : safeMessage(last))
+                );
+            }
+
+            DnsLog.addRaw(
+                    "ROUTE ✓ • "
+                            + request.host
+                            + ":"
+                            + request.port
+                            + " → "
+                            + connectedIp
+            );
 
             sendReply(client, 0x00);
 
             client.setSoTimeout(0);
             upstream.setSoTimeout(0);
 
-            final Socket upstreamFinal =
-                    upstream;
+            final Socket upstreamFinal = upstream;
 
             Future<?> uplink =
                     clients.submit(() ->
@@ -172,12 +260,12 @@ public final class SocksDohBridge {
             } catch (Exception ignored) {
             }
 
-            String message =
-                    safeMessage(e);
+            String message = safeMessage(e);
 
             if (!message.contains("Socket closed")
                     && !message.contains("Broken pipe")
                     && !message.contains("Connection reset")) {
+
                 DnsLog.addRaw(
                         "DOH BRIDGE • "
                                 + message
@@ -424,6 +512,25 @@ public final class SocksDohBridge {
 
         readExact(in, 2);
 
+        return socket;
+    }
+
+    private Socket connectDirect(
+            String ip,
+            int port
+    ) throws Exception {
+
+        Socket socket = new Socket();
+
+        socket.connect(
+                new InetSocketAddress(
+                        ip,
+                        port
+                ),
+                1800
+        );
+
+        socket.setTcpNoDelay(true);
         return socket;
     }
 
