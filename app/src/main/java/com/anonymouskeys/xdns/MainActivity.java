@@ -18,6 +18,7 @@ import android.view.View;
 import android.view.ViewGroup;
 import android.widget.ArrayAdapter;
 import android.widget.Button;
+import android.widget.CheckBox;
 import android.widget.EditText;
 import android.widget.LinearLayout;
 import android.widget.ScrollView;
@@ -100,6 +101,7 @@ public class MainActivity extends Activity {
 
     private EditText customDoh;
     private EditText dpiTtl;
+    private CheckBox forceTcp;
 
     private TextView status;
     private TextView activeDoh;
@@ -525,6 +527,39 @@ public class MainActivity extends Activity {
         );
 
         root.addView(dpiHint);
+
+        forceTcp = new CheckBox(this);
+        forceTcp.setText(
+                "Force TCP in Dragon mode (disable SOCKS UDP/QUIC)"
+        );
+        forceTcp.setTextColor(Color.WHITE);
+        forceTcp.setChecked(
+                prefs.getBoolean(
+                        XDnsVpnService.KEY_FORCE_TCP,
+                        true
+                )
+        );
+
+        root.addView(forceTcp);
+
+        TextView forceTcpHint =
+                text(
+                        "Recommended for YouTube. QUIC uses UDP/443 and can "
+                                + "bypass the TCP DPI strategy. This option "
+                                + "forces a fast fallback to HTTPS/TCP. "
+                                + "Voice calls/games that need UDP may be affected.",
+                        13,
+                        Color.rgb(255, 190, 110)
+                );
+
+        forceTcpHint.setPadding(
+                0,
+                dp(4),
+                0,
+                0
+        );
+
+        root.addView(forceTcpHint);
 
         root.addView(
                 section("Applications")
@@ -1537,6 +1572,10 @@ public class MainActivity extends Activity {
                 .putString(
                         XDnsVpnService.KEY_DPI_STRATEGY,
                         strategy
+                )
+                .putBoolean(
+                        XDnsVpnService.KEY_FORCE_TCP,
+                        forceTcp == null || forceTcp.isChecked()
                 )
                 .apply();
     }

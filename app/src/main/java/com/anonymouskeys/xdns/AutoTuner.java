@@ -159,7 +159,8 @@ public final class AutoTuner {
                     dpi.start(
                             context,
                             fakeTtl,
-                            strategy.id
+                            strategy.id,
+                            true
                     );
 
                     YoutubeProbe.Result probe =

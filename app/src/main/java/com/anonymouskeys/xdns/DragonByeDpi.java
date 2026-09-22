@@ -26,8 +26,12 @@ public final class DragonByeDpi {
         return activeStrategy;
     }
 
-    public synchronized void start(Context context, int fakeTtl, String strategyId)
-            throws Exception {
+    public synchronized void start(
+            Context context,
+            int fakeTtl,
+            String strategyId,
+            boolean forceTcp
+    ) throws Exception {
         if (isRunning()) return;
 
         File binary = new File(
@@ -53,6 +57,16 @@ public final class DragonByeDpi {
                 "--proto", "http,tls",
                 "--pf", "80-443"
         ));
+
+        if (forceTcp) {
+            // ByeDPI SOCKS UDP is intentionally disabled here.
+            // This makes QUIC/UDP fail fast so YouTube falls back to TLS/TCP,
+            // where the selected DPI strategy is actually applied.
+            command.add("--no-udp");
+            DnsLog.addRaw(
+                    "DPI • FORCE TCP enabled • SOCKS UDP/QUIC disabled"
+            );
+        }
 
         command.addAll(preset.args);
 

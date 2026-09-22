@@ -28,6 +28,7 @@ public class XDnsVpnService extends VpnService {
     public static final String KEY_MODE = "vpn_mode";
     public static final String KEY_DPI_TTL = "dpi_fake_ttl";
     public static final String KEY_DPI_STRATEGY = "dpi_strategy";
+    public static final String KEY_FORCE_TCP = "force_tcp";
     public static final String KEY_AUTO_PROFILE = "auto_profile";
     public static final String KEY_LAST_START_STAGE = "last_start_stage";
 
@@ -232,10 +233,17 @@ public class XDnsVpnService extends VpnService {
                 )
                 .apply();
 
+        boolean forceTcp =
+                prefs.getBoolean(
+                        KEY_FORCE_TCP,
+                        true
+                );
+
         byeDpi.start(
                 this,
                 ttl,
-                strategyId
+                strategyId,
+                forceTcp
         );
 
         prefs.edit()
