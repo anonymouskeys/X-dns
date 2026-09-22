@@ -20,6 +20,7 @@ import android.widget.ArrayAdapter;
 import android.widget.Button;
 import android.widget.EditText;
 import android.widget.LinearLayout;
+import android.widget.ProgressBar;
 import android.widget.ScrollView;
 import android.widget.Spinner;
 import android.widget.TextView;
@@ -34,6 +35,9 @@ import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Map;
 import java.util.Set;
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.Executors;
+import java.util.concurrent.atomic.AtomicInteger;
 
 public class MainActivity extends Activity {
 
@@ -50,6 +54,9 @@ public class MainActivity extends Activity {
         BUILTIN_DOH.put("Cloudflare", "https://cloudflare-dns.com/dns-query");
         BUILTIN_DOH.put("Google", "https://dns.google/dns-query");
         BUILTIN_DOH.put("Quad9", "https://dns.quad9.net/dns-query");
+        BUILTIN_DOH.put("AdGuard", "https://dns.adguard-dns.com/dns-query");
+        BUILTIN_DOH.put("DNS.SB", "https://doh.dns.sb/dns-query");
+        BUILTIN_DOH.put("DNS4all", "https://doh.dns4all.eu/dns-query");
     }
 
     private final Handler handler = new Handler(Looper.getMainLooper());
@@ -104,7 +111,7 @@ public class MainActivity extends Activity {
         title.setGravity(Gravity.CENTER_HORIZONTAL);
         root.addView(title);
 
-        TextView subtitle = text("DoH local VPN • v0.2", 15, Color.rgb(170, 174, 185));
+        TextView subtitle = text("DoH local VPN • v0.2.1", 15, Color.rgb(170, 174, 185));
         subtitle.setGravity(Gravity.CENTER_HORIZONTAL);
         root.addView(subtitle);
 
@@ -123,8 +130,11 @@ public class MainActivity extends Activity {
 
         toggle.setOnClickListener(v -> {
             if (XDnsVpnService.isRunning()) {
-                stopService(new Intent(this, XDnsVpnService.class));
-                updateUi();
+                Intent stop = new Intent(this, XDnsVpnService.class);
+                stop.setAction(XDnsVpnService.ACTION_STOP);
+                startService(stop);
+                status.setText("STOPPING…");
+                handler.postDelayed(this::updateUi, 400);
             } else {
                 requestVpn();
             }
@@ -133,7 +143,7 @@ public class MainActivity extends Activity {
         root.addView(section("DNS over HTTPS"));
 
         dohSpinner = new Spinner(this);
-        root.addView(dohSpinner, fullWidth(dp(52)));
+        root.addView(dohSpinner, fullWidth(dp(56)));
 
         customDoh = new EditText(this);
         customDoh.setHint("https://example.org/dns-query");
@@ -144,10 +154,16 @@ public class MainActivity extends Activity {
 
         LinearLayout dnsButtons = horizontal();
         Button addDoh = button("ADD CUSTOM");
-        Button testDoh = button("TEST");
+        Button testDoh = button("TEST SELECTED");
         dnsButtons.addView(addDoh, weighted());
         dnsButtons.addView(testDoh, weighted());
         root.addView(dnsButtons);
+
+        Button testBuiltins = button("TEST ALL BUILT-IN DOH");
+        root.addView(testBuiltins, matchButtonParams());
+
+        Button discover = button("FIND FREE DOH ONLINE");
+        root.addView(discover, matchButtonParams());
 
         testResult = text("DoH test: not run", 14, Color.rgb(180, 185, 198));
         testResult.setPadding(0, dp(8), 0, 0);
@@ -155,6 +171,8 @@ public class MainActivity extends Activity {
 
         addDoh.setOnClickListener(v -> addCustomDoh());
         testDoh.setOnClickListener(v -> testCurrentDoh());
+        testBuiltins.setOnClickListener(v -> testBuiltins());
+        discover.setOnClickListener(v -> discoverFreeDoh());
 
         root.addView(section("Applications"));
 
@@ -264,6 +282,12 @@ public class MainActivity extends Activity {
             return;
         }
 
+        addCustomUrl(url);
+        customDoh.setText("");
+        Toast.makeText(this, "Custom DoH added.", Toast.LENGTH_SHORT).show();
+    }
+
+    private void addCustomUrl(String url) {
         Set<String> saved = new LinkedHashSet<>(
                 prefs.getStringSet(KEY_CUSTOM_DOH, Collections.emptySet())
         );
@@ -274,19 +298,10 @@ public class MainActivity extends Activity {
                 .putString(XDnsVpnService.KEY_DOH_URL, url)
                 .apply();
 
-        customDoh.setText("");
         loadDohOptions();
 
         int position = optionUrls.indexOf(url);
         if (position >= 0) dohSpinner.setSelection(position);
-
-        Toast.makeText(
-                this,
-                XDnsVpnService.isRunning()
-                        ? "Added. Restart X-dns to make it active for the tunnel."
-                        : "Custom DoH added.",
-                Toast.LENGTH_LONG
-        ).show();
     }
 
     private String currentDoh() {
@@ -311,18 +326,194 @@ public class MainActivity extends Activity {
                 if (result.ok()) {
                     String ip = DnsPacket.firstAddress(result.body);
                     testResult.setText(
-                            "DoH test: OK • " + result.latencyMs + " ms • example.com → " + ip
+                            "DoH test: OK • " + result.latencyMs + " ms • "
+                                    + result.method + " • example.com → " + ip
                     );
                     testResult.setTextColor(Color.rgb(88, 214, 141));
                 } else {
                     testResult.setText(
                             "DoH test: ERROR • "
                                     + (result.error == null ? "unknown" : result.error)
+                                    + " • " + result.method
                     );
                     testResult.setTextColor(Color.rgb(255, 120, 120));
                 }
             });
         }, "xdns-test").start();
+    }
+
+    private void testBuiltins() {
+        final ArrayList<Map.Entry<String, String>> entries =
+                new ArrayList<>(BUILTIN_DOH.entrySet());
+
+        final ExecutorService pool = Executors.newFixedThreadPool(5);
+        final ArrayList<DohTestItem> results =
+                new ArrayList<>(Collections.nCopies(entries.size(), null));
+        final AtomicInteger remaining = new AtomicInteger(entries.size());
+
+        testResult.setText("Testing " + entries.size() + " built-in DoH servers…");
+        testResult.setTextColor(Color.rgb(180, 185, 198));
+
+        for (int i = 0; i < entries.size(); i++) {
+            final int index = i;
+            final Map.Entry<String, String> entry = entries.get(i);
+
+            pool.submit(() -> {
+                DohClient.Result result = DohClient.query(
+                        entry.getValue(),
+                        DohClient.makeTestQuery("example.com")
+                );
+
+                synchronized (results) {
+                    results.set(index, new DohTestItem(
+                            entry.getKey(),
+                            entry.getValue(),
+                            result
+                    ));
+                }
+
+                if (remaining.decrementAndGet() == 0) {
+                    pool.shutdown();
+                    runOnUiThread(() -> showDohTestResults(results));
+                }
+            });
+        }
+    }
+
+    private void showDohTestResults(List<DohTestItem> source) {
+        ArrayList<DohTestItem> results = new ArrayList<>(source);
+
+        results.sort((a, b) -> {
+            if (a.result.ok() != b.result.ok()) return a.result.ok() ? -1 : 1;
+            return Long.compare(a.result.latencyMs, b.result.latencyMs);
+        });
+
+        String[] labels = new String[results.size()];
+
+        for (int i = 0; i < results.size(); i++) {
+            DohTestItem item = results.get(i);
+            String prefix = item.result.ok() ? "✓ " : "✗ ";
+            labels[i] = prefix + item.name + " • " + item.result.shortStatus()
+                    + "\n" + item.url;
+        }
+
+        new AlertDialog.Builder(this)
+                .setTitle("Built-in DoH test")
+                .setItems(labels, (dialog, which) -> {
+                    DohTestItem selected = results.get(which);
+
+                    if (selected.result.ok()) {
+                        prefs.edit()
+                                .putString(XDnsVpnService.KEY_DOH_URL, selected.url)
+                                .apply();
+                        loadDohOptions();
+                        Toast.makeText(
+                                this,
+                                "Selected: " + selected.name,
+                                Toast.LENGTH_SHORT
+                        ).show();
+                    } else {
+                        Toast.makeText(
+                                this,
+                                "That resolver failed on this network.",
+                                Toast.LENGTH_LONG
+                        ).show();
+                    }
+                })
+                .setPositiveButton("CLOSE", null)
+                .show();
+
+        long working = results.stream().filter(x -> x.result.ok()).count();
+        testResult.setText(
+                "Built-ins: " + working + "/" + results.size() + " working"
+        );
+        testResult.setTextColor(
+                working > 0 ? Color.rgb(88, 214, 141) : Color.rgb(255, 120, 120)
+        );
+    }
+
+    private void discoverFreeDoh() {
+        testResult.setText("Downloading public DoH catalog…");
+        testResult.setTextColor(Color.rgb(180, 185, 198));
+
+        new Thread(() -> {
+            try {
+                List<String> urls = DohCatalog.fetchPublicDohUrls();
+
+                runOnUiThread(() -> showDiscoveredUrls(urls));
+            } catch (Exception e) {
+                runOnUiThread(() -> {
+                    testResult.setText("Catalog error: " + safeMessage(e));
+                    testResult.setTextColor(Color.rgb(255, 120, 120));
+                });
+            }
+        }, "xdns-catalog").start();
+    }
+
+    private void showDiscoveredUrls(List<String> urls) {
+        if (urls == null || urls.isEmpty()) {
+            testResult.setText("Catalog returned no DoH URLs.");
+            testResult.setTextColor(Color.rgb(255, 120, 120));
+            return;
+        }
+
+        // Keep the dialog manageable; the source may contain hundreds.
+        int max = Math.min(urls.size(), 120);
+        String[] labels = new String[max];
+
+        for (int i = 0; i < max; i++) {
+            labels[i] = urls.get(i);
+        }
+
+        testResult.setText("Found " + urls.size() + " public DoH endpoints.");
+        testResult.setTextColor(Color.rgb(88, 214, 141));
+
+        new AlertDialog.Builder(this)
+                .setTitle("Free public DoH catalog (" + urls.size() + ")")
+                .setItems(labels, (dialog, which) -> {
+                    String url = labels[which];
+                    testAndOfferDiscovered(url);
+                })
+                .setNegativeButton("CLOSE", null)
+                .show();
+    }
+
+    private void testAndOfferDiscovered(String url) {
+        testResult.setText("Testing discovered DoH… " + url);
+
+        new Thread(() -> {
+            DohClient.Result result = DohClient.query(
+                    url,
+                    DohClient.makeTestQuery("example.com")
+            );
+
+            runOnUiThread(() -> {
+                if (result.ok()) {
+                    String ip = DnsPacket.firstAddress(result.body);
+
+                    new AlertDialog.Builder(this)
+                            .setTitle("Working DoH")
+                            .setMessage(
+                                    url + "\n\n"
+                                            + result.latencyMs + " ms • "
+                                            + result.method
+                                            + "\nexample.com → " + ip
+                            )
+                            .setNegativeButton("CANCEL", null)
+                            .setPositiveButton("ADD & SELECT", (d, w) -> {
+                                addCustomUrl(url);
+                                testResult.setText("Selected working DoH: " + url);
+                                testResult.setTextColor(Color.rgb(88, 214, 141));
+                            })
+                            .show();
+                } else {
+                    testResult.setText(
+                            "Discovered DoH failed: " + result.shortStatus()
+                    );
+                    testResult.setTextColor(Color.rgb(255, 120, 120));
+                }
+            });
+        }, "xdns-discovered-test").start();
     }
 
     private void requestVpn() {
@@ -341,6 +532,7 @@ public class MainActivity extends Activity {
                 .apply();
 
         Intent service = new Intent(this, XDnsVpnService.class);
+        service.setAction(XDnsVpnService.ACTION_START);
 
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
             startForegroundService(service);
@@ -348,7 +540,7 @@ public class MainActivity extends Activity {
             startService(service);
         }
 
-        handler.postDelayed(this::updateUi, 300);
+        handler.postDelayed(this::updateUi, 350);
     }
 
     @Override
@@ -371,6 +563,7 @@ public class MainActivity extends Activity {
 
         for (ResolveInfo info : resolved) {
             if (info.activityInfo == null || info.activityInfo.packageName == null) continue;
+
             String pkg = info.activityInfo.packageName;
             if (pkg.equals(getPackageName())) continue;
 
@@ -394,7 +587,10 @@ public class MainActivity extends Activity {
         boolean[] checked = new boolean[apps.size()];
 
         Set<String> saved = new HashSet<>(
-                prefs.getStringSet(XDnsVpnService.KEY_EXCLUDED_APPS, Collections.emptySet())
+                prefs.getStringSet(
+                        XDnsVpnService.KEY_EXCLUDED_APPS,
+                        Collections.emptySet()
+                )
         );
         Set<String> selected = new HashSet<>(saved);
 
@@ -446,7 +642,10 @@ public class MainActivity extends Activity {
 
         activeDoh.setText(
                 "Selected DoH: "
-                        + prefs.getString(XDnsVpnService.KEY_DOH_URL, XDnsVpnService.DEFAULT_DOH)
+                        + prefs.getString(
+                                XDnsVpnService.KEY_DOH_URL,
+                                XDnsVpnService.DEFAULT_DOH
+                        )
         );
 
         stats.setText(DnsLog.statsText());
@@ -517,7 +716,7 @@ public class MainActivity extends Activity {
         Button button = new Button(this);
         button.setText(label);
         button.setAllCaps(false);
-        button.setTextSize(16);
+        button.setTextSize(15);
         return button;
     }
 
@@ -551,6 +750,13 @@ public class MainActivity extends Activity {
         return Math.round(value * getResources().getDisplayMetrics().density);
     }
 
+    private static String safeMessage(Exception e) {
+        String message = e.getMessage();
+        return message == null || message.trim().isEmpty()
+                ? e.getClass().getSimpleName()
+                : message;
+    }
+
     private static final class AppItem {
         final String label;
         final String packageName;
@@ -558,6 +764,18 @@ public class MainActivity extends Activity {
         AppItem(String label, String packageName) {
             this.label = label;
             this.packageName = packageName;
+        }
+    }
+
+    private static final class DohTestItem {
+        final String name;
+        final String url;
+        final DohClient.Result result;
+
+        DohTestItem(String name, String url, DohClient.Result result) {
+            this.name = name;
+            this.url = url;
+            this.result = result;
         }
     }
 }

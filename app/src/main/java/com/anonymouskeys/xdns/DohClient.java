@@ -1,13 +1,31 @@
 package com.anonymouskeys.xdns;
 
 import java.io.ByteArrayOutputStream;
-import java.io.InputStream;
-import java.io.OutputStream;
-import java.net.HttpURLConnection;
-import java.net.URL;
 import java.security.SecureRandom;
+import java.util.Base64;
+import java.util.concurrent.TimeUnit;
+
+import okhttp3.HttpUrl;
+import okhttp3.MediaType;
+import okhttp3.OkHttpClient;
+import okhttp3.Request;
+import okhttp3.RequestBody;
+import okhttp3.Response;
+import okhttp3.ResponseBody;
 
 public final class DohClient {
+
+    private static final MediaType DNS_MEDIA =
+            MediaType.get("application/dns-message");
+
+    private static final OkHttpClient CLIENT =
+            new OkHttpClient.Builder()
+                    .connectTimeout(10, TimeUnit.SECONDS)
+                    .readTimeout(12, TimeUnit.SECONDS)
+                    .writeTimeout(12, TimeUnit.SECONDS)
+                    .callTimeout(15, TimeUnit.SECONDS)
+                    .retryOnConnectionFailure(true)
+                    .build();
 
     private DohClient() {}
 
@@ -15,73 +33,164 @@ public final class DohClient {
         public final byte[] body;
         public final long latencyMs;
         public final int httpCode;
+        public final String method;
         public final String error;
 
-        Result(byte[] body, long latencyMs, int httpCode, String error) {
+        Result(byte[] body, long latencyMs, int httpCode, String method, String error) {
             this.body = body;
             this.latencyMs = latencyMs;
             this.httpCode = httpCode;
+            this.method = method;
             this.error = error;
         }
 
         public boolean ok() {
             return body != null && error == null && httpCode == 200;
         }
+
+        public String shortStatus() {
+            if (ok()) return "OK " + latencyMs + " ms (" + method + ")";
+            return "ERROR " + (error == null ? ("HTTP " + httpCode) : error);
+        }
     }
 
     public static Result query(String endpoint, byte[] dnsMessage) {
+        Result post = queryPost(endpoint, dnsMessage);
+
+        // Some real-world resolvers/gateways behave differently from the RFC.
+        // Retry wire-format GET when POST is rejected or malformed upstream.
+        if (post.ok()) return post;
+
+        if (post.httpCode == 400
+                || post.httpCode == 404
+                || post.httpCode == 405
+                || post.httpCode == 415
+                || post.httpCode == 501) {
+            Result get = queryGet(endpoint, dnsMessage);
+            if (get.ok()) return get;
+            return preferUsefulError(post, get);
+        }
+
+        // Also try GET after transport-ish failures because it can take a
+        // different proxy/cache path on some mobile networks.
+        if (post.httpCode < 0) {
+            Result get = queryGet(endpoint, dnsMessage);
+            if (get.ok()) return get;
+            return preferUsefulError(post, get);
+        }
+
+        return post;
+    }
+
+    private static Result queryPost(String endpoint, byte[] dnsMessage) {
         long started = System.currentTimeMillis();
-        HttpURLConnection connection = null;
 
         try {
-            URL url = new URL(endpoint);
-            connection = (HttpURLConnection) url.openConnection();
-            connection.setConnectTimeout(12000);
-            connection.setReadTimeout(12000);
-            connection.setInstanceFollowRedirects(true);
-            connection.setRequestMethod("POST");
-            connection.setDoOutput(true);
-            connection.setUseCaches(false);
-            connection.setRequestProperty("Accept", "application/dns-message");
-            connection.setRequestProperty("Content-Type", "application/dns-message");
-            connection.setRequestProperty("User-Agent", "X-dns/0.2");
-            connection.setRequestProperty("Connection", "close");
-            connection.setFixedLengthStreamingMode(dnsMessage.length);
+            RequestBody body = RequestBody.create(dnsMessage, DNS_MEDIA);
 
-            try (OutputStream os = connection.getOutputStream()) {
-                os.write(dnsMessage);
-                os.flush();
+            Request request = new Request.Builder()
+                    .url(endpoint)
+                    .header("Accept", "application/dns-message")
+                    .header("Content-Type", "application/dns-message")
+                    .header("User-Agent", "X-dns/0.2.1")
+                    .post(body)
+                    .build();
+
+            try (Response response = CLIENT.newCall(request).execute()) {
+                long latency = System.currentTimeMillis() - started;
+                byte[] bytes = bodyBytes(response.body());
+
+                if (response.code() != 200) {
+                    return new Result(
+                            null,
+                            latency,
+                            response.code(),
+                            "POST",
+                            "HTTP " + response.code()
+                    );
+                }
+
+                if (bytes == null || bytes.length < 12) {
+                    return new Result(
+                            null,
+                            latency,
+                            response.code(),
+                            "POST",
+                            "Invalid DNS response"
+                    );
+                }
+
+                return new Result(bytes, latency, response.code(), "POST", null);
             }
-
-            int code = connection.getResponseCode();
-            InputStream source = code >= 200 && code < 300
-                    ? connection.getInputStream()
-                    : connection.getErrorStream();
-
-            byte[] body = source == null ? new byte[0] : readLimited(source, 65535);
-            long latency = System.currentTimeMillis() - started;
-
-            if (code != 200) {
-                return new Result(null, latency, code, "HTTP " + code);
-            }
-
-            if (body.length < 12) {
-                return new Result(null, latency, code, "Invalid DNS response");
-            }
-
-            return new Result(body, latency, code, null);
-
         } catch (Exception e) {
-            long latency = System.currentTimeMillis() - started;
-            String message = e.getMessage();
-            if (message == null || message.trim().isEmpty()) {
-                message = e.getClass().getSimpleName();
+            return new Result(
+                    null,
+                    System.currentTimeMillis() - started,
+                    -1,
+                    "POST",
+                    safeMessage(e)
+            );
+        }
+    }
+
+    private static Result queryGet(String endpoint, byte[] dnsMessage) {
+        long started = System.currentTimeMillis();
+
+        try {
+            HttpUrl base = HttpUrl.parse(endpoint);
+            if (base == null) {
+                return new Result(null, 0, -1, "GET", "Invalid DoH URL");
             }
-            return new Result(null, latency, -1, message);
-        } finally {
-            if (connection != null) {
-                connection.disconnect();
+
+            String encoded = Base64.getUrlEncoder()
+                    .withoutPadding()
+                    .encodeToString(dnsMessage);
+
+            HttpUrl url = base.newBuilder()
+                    .setQueryParameter("dns", encoded)
+                    .build();
+
+            Request request = new Request.Builder()
+                    .url(url)
+                    .header("Accept", "application/dns-message")
+                    .header("User-Agent", "X-dns/0.2.1")
+                    .get()
+                    .build();
+
+            try (Response response = CLIENT.newCall(request).execute()) {
+                long latency = System.currentTimeMillis() - started;
+                byte[] bytes = bodyBytes(response.body());
+
+                if (response.code() != 200) {
+                    return new Result(
+                            null,
+                            latency,
+                            response.code(),
+                            "GET",
+                            "HTTP " + response.code()
+                    );
+                }
+
+                if (bytes == null || bytes.length < 12) {
+                    return new Result(
+                            null,
+                            latency,
+                            response.code(),
+                            "GET",
+                            "Invalid DNS response"
+                    );
+                }
+
+                return new Result(bytes, latency, response.code(), "GET", null);
             }
+        } catch (Exception e) {
+            return new Result(
+                    null,
+                    System.currentTimeMillis() - started,
+                    -1,
+                    "GET",
+                    safeMessage(e)
+            );
         }
     }
 
@@ -90,8 +199,8 @@ public final class DohClient {
         int id = new SecureRandom().nextInt(65536);
 
         write16(out, id);
-        write16(out, 0x0100); // RD
-        write16(out, 1);      // QDCOUNT
+        write16(out, 0x0100);
+        write16(out, 1);
         write16(out, 0);
         write16(out, 0);
         write16(out, 0);
@@ -102,10 +211,15 @@ public final class DohClient {
             out.write(bytes.length);
             out.write(bytes, 0, bytes.length);
         }
+
         out.write(0);
-        write16(out, 1); // A
-        write16(out, 1); // IN
+        write16(out, 1);
+        write16(out, 1);
         return out.toByteArray();
+    }
+
+    private static byte[] bodyBytes(ResponseBody body) throws Exception {
+        return body == null ? null : body.bytes();
     }
 
     private static void write16(ByteArrayOutputStream out, int value) {
@@ -113,22 +227,17 @@ public final class DohClient {
         out.write(value & 0xff);
     }
 
-    private static byte[] readLimited(InputStream in, int max) throws Exception {
-        try (InputStream input = in;
-             ByteArrayOutputStream out = new ByteArrayOutputStream()) {
+    private static Result preferUsefulError(Result a, Result b) {
+        if (b.httpCode > 0 && a.httpCode < 0) return b;
+        if (a.httpCode > 0 && b.httpCode < 0) return a;
+        if (b.error != null && a.error != null && b.error.length() < a.error.length()) return b;
+        return a;
+    }
 
-            byte[] buffer = new byte[4096];
-            int total = 0;
-            int n;
-
-            while ((n = input.read(buffer)) != -1) {
-                total += n;
-                if (total > max) {
-                    throw new IllegalStateException("DoH response too large");
-                }
-                out.write(buffer, 0, n);
-            }
-            return out.toByteArray();
-        }
+    private static String safeMessage(Exception e) {
+        String msg = e.getMessage();
+        return msg == null || msg.trim().isEmpty()
+                ? e.getClass().getSimpleName()
+                : msg;
     }
 }

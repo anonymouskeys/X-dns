@@ -25,6 +25,9 @@ public class XDnsVpnService extends VpnService {
     public static final String KEY_DOH_URL = "doh_url";
     public static final String KEY_EXCLUDED_APPS = "excluded_apps";
 
+    public static final String ACTION_START = "com.anonymouskeys.xdns.START";
+    public static final String ACTION_STOP = "com.anonymouskeys.xdns.STOP";
+
     public static final String DEFAULT_DOH = "https://doh.xfinity.com/dns-query";
 
     private static final String CHANNEL_ID = "xdns_vpn";
@@ -33,8 +36,8 @@ public class XDnsVpnService extends VpnService {
     private static volatile boolean running = false;
 
     private final Object outputLock = new Object();
-    private final ExecutorService dohPool = Executors.newFixedThreadPool(4);
 
+    private ExecutorService dohPool;
     private ParcelFileDescriptor vpnInterface;
     private FileInputStream vpnInput;
     private FileOutputStream vpnOutput;
@@ -47,28 +50,27 @@ public class XDnsVpnService extends VpnService {
     @Override
     public void onCreate() {
         super.onCreate();
+        dohPool = Executors.newFixedThreadPool(4);
         createNotificationChannel();
-
-        Notification notification = createNotification();
-
-        if (Build.VERSION.SDK_INT >= 34) {
-            startForeground(
-                    NOTIFICATION_ID,
-                    notification,
-                    ServiceInfo.FOREGROUND_SERVICE_TYPE_SPECIAL_USE
-            );
-        } else {
-            startForeground(NOTIFICATION_ID, notification);
-        }
     }
 
     @Override
     public int onStartCommand(Intent intent, int flags, int startId) {
+        String action = intent == null ? ACTION_START : intent.getAction();
+
+        if (ACTION_STOP.equals(action)) {
+            stopNow();
+            return START_NOT_STICKY;
+        }
+
         if (vpnInterface == null) {
             try {
+                startForegroundCompat(createNotification());
                 startDnsTunnel();
             } catch (Exception e) {
-                DnsLog.addRaw("VPN ERROR • " + e.getMessage());
+                DnsLog.addRaw("VPN ERROR • " + safeMessage(e));
+                running = false;
+                stopForegroundCompat();
                 stopSelf();
                 return START_NOT_STICKY;
             }
@@ -92,8 +94,6 @@ public class XDnsVpnService extends VpnService {
             builder.setMetered(false);
         }
 
-        // Critical: the X-dns process itself must use the underlying network,
-        // otherwise resolving the DoH hostname would recurse back into X-dns.
         try {
             builder.addDisallowedApplication(getPackageName());
         } catch (Exception ignored) {
@@ -140,7 +140,11 @@ public class XDnsVpnService extends VpnService {
                 if (request == null) continue;
 
                 DnsLog.queryReceived(length);
-                dohPool.submit(() -> handleDns(request));
+
+                ExecutorService pool = dohPool;
+                if (pool != null && !pool.isShutdown()) {
+                    pool.submit(() -> handleDns(request));
+                }
             }
         } catch (Exception e) {
             if (running) {
@@ -153,8 +157,8 @@ public class XDnsVpnService extends VpnService {
         String name = DnsPacket.queryName(request.dns);
         String type = DnsPacket.queryType(request.dns);
 
-        SharedPreferences prefs = getSharedPreferences(PREFS, MODE_PRIVATE);
-        String dohUrl = prefs.getString(KEY_DOH_URL, DEFAULT_DOH);
+        String dohUrl = getSharedPreferences(PREFS, MODE_PRIVATE)
+                .getString(KEY_DOH_URL, DEFAULT_DOH);
 
         DohClient.Result result = DohClient.query(dohUrl, request.dns);
 
@@ -176,12 +180,10 @@ public class XDnsVpnService extends VpnService {
                 byte[] response = DnsPacket.buildIpv4UdpResponse(request, servFail);
                 writePacket(response);
 
-                DnsLog.failure(
-                        name,
-                        type,
-                        result.error == null ? "DoH failed" : result.error,
-                        result.latencyMs
-                );
+                String error = (result.error == null ? "DoH failed" : result.error)
+                        + " [" + result.method + "]";
+
+                DnsLog.failure(name, type, error, result.latencyMs);
             }
         } catch (Exception e) {
             DnsLog.failure(name, type, safeMessage(e), result.latencyMs);
@@ -197,22 +199,14 @@ public class XDnsVpnService extends VpnService {
         }
     }
 
-    @Override
-    public void onRevoke() {
-        stopSelf();
-        super.onRevoke();
-    }
-
-    @Override
-    public void onDestroy() {
+    private void stopNow() {
         running = false;
+        DnsLog.addRaw("STOP requested");
 
         if (tunThread != null) {
             tunThread.interrupt();
             tunThread = null;
         }
-
-        dohPool.shutdownNow();
 
         closeQuietly(vpnInput);
         closeQuietly(vpnOutput);
@@ -227,8 +221,65 @@ public class XDnsVpnService extends VpnService {
             vpnInterface = null;
         }
 
-        DnsLog.addRaw("STOP");
+        if (dohPool != null) {
+            dohPool.shutdownNow();
+        }
+
+        stopForegroundCompat();
+        stopSelf();
+    }
+
+    @Override
+    public void onRevoke() {
+        stopNow();
+        super.onRevoke();
+    }
+
+    @Override
+    public void onDestroy() {
+        running = false;
+
+        if (tunThread != null) {
+            tunThread.interrupt();
+            tunThread = null;
+        }
+
+        closeQuietly(vpnInput);
+        closeQuietly(vpnOutput);
+
+        if (vpnInterface != null) {
+            try {
+                vpnInterface.close();
+            } catch (IOException ignored) {
+            }
+            vpnInterface = null;
+        }
+
+        if (dohPool != null) {
+            dohPool.shutdownNow();
+        }
+
         super.onDestroy();
+    }
+
+    private void startForegroundCompat(Notification notification) {
+        if (Build.VERSION.SDK_INT >= 34) {
+            startForeground(
+                    NOTIFICATION_ID,
+                    notification,
+                    ServiceInfo.FOREGROUND_SERVICE_TYPE_SPECIAL_USE
+            );
+        } else {
+            startForeground(NOTIFICATION_ID, notification);
+        }
+    }
+
+    private void stopForegroundCompat() {
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.N) {
+            stopForeground(STOP_FOREGROUND_REMOVE);
+        } else {
+            stopForeground(true);
+        }
     }
 
     private void createNotificationChannel() {
