@@ -1,0 +1,39 @@
+name: Build X-dns APK
+
+on:
+  push:
+    branches: [ "main" ]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Java
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "21"
+
+      - name: Set up Gradle
+        uses: gradle/actions/setup-gradle@v4
+
+      - name: Build universal APK
+        run: |
+          chmod +x gradlew
+          ./gradlew clean assembleDebug --no-daemon
+          mkdir -p dist
+          cp app/build/outputs/apk/debug/app-debug.apk dist/X-dns-universal.apk
+
+      - name: Upload APK
+        uses: actions/upload-artifact@v4
+        with:
+          name: X-dns-universal
+          path: dist/X-dns-universal.apk
