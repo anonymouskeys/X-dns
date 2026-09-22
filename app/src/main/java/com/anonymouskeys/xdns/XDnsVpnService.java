@@ -22,8 +22,14 @@ import java.util.concurrent.Executors;
 public class XDnsVpnService extends VpnService {
 
     public static final String PREFS = "xdns";
+
     public static final String KEY_DOH_URL = "doh_url";
     public static final String KEY_EXCLUDED_APPS = "excluded_apps";
+    public static final String KEY_MODE = "vpn_mode";
+    public static final String KEY_DPI_TTL = "dpi_fake_ttl";
+
+    public static final String MODE_DOH = "doh";
+    public static final String MODE_DRAGON_DPI = "dragon_dpi";
 
     public static final String ACTION_START = "com.anonymouskeys.xdns.START";
     public static final String ACTION_STOP = "com.anonymouskeys.xdns.STOP";
@@ -34,6 +40,7 @@ public class XDnsVpnService extends VpnService {
     private static final int NOTIFICATION_ID = 100;
 
     private static volatile boolean running = false;
+    private static volatile String runningMode = MODE_DOH;
 
     private final Object outputLock = new Object();
 
@@ -43,14 +50,23 @@ public class XDnsVpnService extends VpnService {
     private FileOutputStream vpnOutput;
     private Thread tunThread;
 
+    private DragonByeDpi byeDpi;
+    private HevTunnel hevTunnel;
+
     public static boolean isRunning() {
         return running;
+    }
+
+    public static String runningMode() {
+        return runningMode;
     }
 
     @Override
     public void onCreate() {
         super.onCreate();
         dohPool = Executors.newFixedThreadPool(4);
+        byeDpi = new DragonByeDpi();
+        hevTunnel = new HevTunnel();
         createNotificationChannel();
     }
 
@@ -63,38 +79,117 @@ public class XDnsVpnService extends VpnService {
             return START_NOT_STICKY;
         }
 
-        if (vpnInterface == null) {
-            try {
-                startForegroundCompat(createNotification());
-                startDnsTunnel();
-            } catch (Exception e) {
-                DnsLog.addRaw("VPN ERROR • " + safeMessage(e));
-                running = false;
-                stopForegroundCompat();
-                stopSelf();
-                return START_NOT_STICKY;
-            }
+        if (vpnInterface != null) {
+            return START_STICKY;
         }
 
-        return START_STICKY;
+        try {
+            startForegroundCompat(createNotification());
+
+            SharedPreferences prefs = getSharedPreferences(PREFS, MODE_PRIVATE);
+            String mode = prefs.getString(KEY_MODE, MODE_DOH);
+
+            if (MODE_DRAGON_DPI.equals(mode)) {
+                startDragonDpi(prefs);
+            } else {
+                startDnsOnly(prefs);
+            }
+
+            return START_STICKY;
+
+        } catch (Throwable e) {
+            DnsLog.addRaw("VPN ERROR • " + safeMessage(e));
+            running = false;
+            stopForegroundCompat();
+            stopSelf();
+            return START_NOT_STICKY;
+        }
     }
 
-    private void startDnsTunnel() throws Exception {
-        SharedPreferences prefs = getSharedPreferences(PREFS, MODE_PRIVATE);
+    private void startDnsOnly(SharedPreferences prefs) throws Exception {
         String dohUrl = prefs.getString(KEY_DOH_URL, DEFAULT_DOH);
 
-        Builder builder = new Builder()
-                .setSession("X-dns")
+        Builder builder = baseBuilder()
+                .setSession("X-dns • DoH")
                 .setMtu(8500)
                 .addAddress("10.253.0.2", 32)
                 .addRoute("10.253.0.1", 32)
                 .addDnsServer("10.253.0.1");
 
+        applyExclusions(builder, prefs);
+
+        vpnInterface = builder.establish();
+        if (vpnInterface == null) {
+            throw new IllegalStateException("Android refused DoH TUN");
+        }
+
+        vpnInput = new FileInputStream(vpnInterface.getFileDescriptor());
+        vpnOutput = new FileOutputStream(vpnInterface.getFileDescriptor());
+
+        runningMode = MODE_DOH;
+        running = true;
+        DnsLog.beginSession("DoH • " + dohUrl);
+
+        tunThread = new Thread(this::tunLoop, "xdns-doh-tun");
+        tunThread.start();
+    }
+
+    private void startDragonDpi(SharedPreferences prefs) throws Exception {
+        int ttl;
+        try {
+            ttl = Integer.parseInt(prefs.getString(KEY_DPI_TTL, "8"));
+        } catch (Exception e) {
+            ttl = 8;
+        }
+
+        DnsLog.beginSession("Dragon DPI • Maximum");
+        byeDpi.start(this, ttl);
+
+        Builder builder = baseBuilder()
+                .setSession("X-dns • Dragon DPI")
+                .setMtu(8500)
+                .addAddress("10.10.10.10", 32)
+                .addRoute("0.0.0.0", 0)
+                // v0.3 proves the Dragon full-traffic path first.
+                // Full DoH+TUN merging comes after the native DNS intercept layer.
+                .addDnsServer("1.1.1.1");
+
+        applyExclusions(builder, prefs);
+
+        vpnInterface = builder.establish();
+        if (vpnInterface == null) {
+            byeDpi.stop();
+            throw new IllegalStateException("Android refused full DPI TUN");
+        }
+
+        runningMode = MODE_DRAGON_DPI;
+        running = true;
+
+        try {
+            hevTunnel.start(this, vpnInterface);
+        } catch (Throwable e) {
+            running = false;
+            closeVpn();
+            byeDpi.stop();
+            throw e;
+        }
+
+        DnsLog.addRaw("DPI • full route 0.0.0.0/0 active");
+    }
+
+    private Builder baseBuilder() {
+        Builder builder = new Builder();
+
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
             builder.setMetered(false);
         }
 
+        return builder;
+    }
+
+    private void applyExclusions(Builder builder, SharedPreferences prefs) {
         try {
+            // Critical: ciadpi/DoH sockets belong to our UID and must bypass our own VPN.
             builder.addDisallowedApplication(getPackageName());
         } catch (Exception ignored) {
         }
@@ -105,32 +200,22 @@ public class XDnsVpnService extends VpnService {
 
         for (String packageName : excluded) {
             if (packageName == null || packageName.equals(getPackageName())) continue;
+
             try {
                 builder.addDisallowedApplication(packageName);
             } catch (Exception ignored) {
             }
         }
-
-        vpnInterface = builder.establish();
-        if (vpnInterface == null) {
-            throw new IllegalStateException("Android refused to create TUN interface");
-        }
-
-        vpnInput = new FileInputStream(vpnInterface.getFileDescriptor());
-        vpnOutput = new FileOutputStream(vpnInterface.getFileDescriptor());
-
-        running = true;
-        DnsLog.beginSession(dohUrl);
-
-        tunThread = new Thread(this::tunLoop, "xdns-tun");
-        tunThread.start();
     }
 
     private void tunLoop() {
         byte[] buffer = new byte[65535];
 
         try {
-            while (running && !Thread.currentThread().isInterrupted()) {
+            while (running
+                    && MODE_DOH.equals(runningMode)
+                    && !Thread.currentThread().isInterrupted()) {
+
                 int length = vpnInput.read(buffer);
                 if (length <= 0) continue;
 
@@ -147,7 +232,7 @@ public class XDnsVpnService extends VpnService {
                 }
             }
         } catch (Exception e) {
-            if (running) {
+            if (running && MODE_DOH.equals(runningMode)) {
                 DnsLog.addRaw("TUN ERROR • " + safeMessage(e));
             }
         }
@@ -199,15 +284,44 @@ public class XDnsVpnService extends VpnService {
         }
     }
 
+    public static long[] getDpiStats() {
+        if (!running || !MODE_DRAGON_DPI.equals(runningMode)) {
+            return new long[]{0, 0, 0, 0};
+        }
+        return HevTunnel.stats();
+    }
+
     private void stopNow() {
         running = false;
-        DnsLog.addRaw("STOP requested");
 
         if (tunThread != null) {
             tunThread.interrupt();
             tunThread = null;
         }
 
+        try {
+            if (hevTunnel != null) hevTunnel.stop();
+        } catch (Throwable ignored) {
+        }
+
+        try {
+            if (byeDpi != null) byeDpi.stop();
+        } catch (Throwable ignored) {
+        }
+
+        closeVpn();
+
+        if (dohPool != null) {
+            dohPool.shutdownNow();
+        }
+
+        stopForegroundCompat();
+        stopSelf();
+
+        DnsLog.addRaw("STOP completed");
+    }
+
+    private void closeVpn() {
         closeQuietly(vpnInput);
         closeQuietly(vpnOutput);
         vpnInput = null;
@@ -220,13 +334,6 @@ public class XDnsVpnService extends VpnService {
             }
             vpnInterface = null;
         }
-
-        if (dohPool != null) {
-            dohPool.shutdownNow();
-        }
-
-        stopForegroundCompat();
-        stopSelf();
     }
 
     @Override
@@ -237,28 +344,9 @@ public class XDnsVpnService extends VpnService {
 
     @Override
     public void onDestroy() {
-        running = false;
-
-        if (tunThread != null) {
-            tunThread.interrupt();
-            tunThread = null;
+        if (running || vpnInterface != null) {
+            stopNow();
         }
-
-        closeQuietly(vpnInput);
-        closeQuietly(vpnOutput);
-
-        if (vpnInterface != null) {
-            try {
-                vpnInterface.close();
-            } catch (IOException ignored) {
-            }
-            vpnInterface = null;
-        }
-
-        if (dohPool != null) {
-            dohPool.shutdownNow();
-        }
-
         super.onDestroy();
     }
 
@@ -289,7 +377,8 @@ public class XDnsVpnService extends VpnService {
                     "X-dns VPN",
                     NotificationManager.IMPORTANCE_LOW
             );
-            channel.setDescription("DNS-over-HTTPS local VPN");
+
+            channel.setDescription("X-dns local VPN");
 
             NotificationManager manager = getSystemService(NotificationManager.class);
             manager.createNotificationChannel(channel);
@@ -313,7 +402,7 @@ public class XDnsVpnService extends VpnService {
         return builder
                 .setSmallIcon(R.drawable.ic_vpn)
                 .setContentTitle("X-dns")
-                .setContentText("DNS-over-HTTPS is active")
+                .setContentText("Local VPN engine is active")
                 .setContentIntent(pendingIntent)
                 .setOngoing(true)
                 .build();
@@ -321,14 +410,16 @@ public class XDnsVpnService extends VpnService {
 
     private static void closeQuietly(java.io.Closeable closeable) {
         if (closeable == null) return;
+
         try {
             closeable.close();
         } catch (Exception ignored) {
         }
     }
 
-    private static String safeMessage(Exception e) {
+    private static String safeMessage(Throwable e) {
         String message = e.getMessage();
+
         return message == null || message.trim().isEmpty()
                 ? e.getClass().getSimpleName()
                 : message;

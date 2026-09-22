@@ -1,4 +1,4 @@
-name: Build X-dns APK
+name: Build X-dns universal APK
 
 on:
   push:
@@ -13,7 +13,7 @@ jobs:
     runs-on: ubuntu-latest
 
     steps:
-      - name: Checkout
+      - name: Checkout X-dns
         uses: actions/checkout@v4
 
       - name: Set up Java
@@ -25,15 +25,57 @@ jobs:
       - name: Set up Gradle
         uses: gradle/actions/setup-gradle@v4
 
+      - name: Install Android NDK
+        shell: bash
+        run: |
+          yes | "$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager" --licenses >/dev/null || true
+          "$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager" "ndk;27.2.12479018"
+
+      - name: Build Dragon native DPI components
+        shell: bash
+        run: |
+          set -euxo pipefail
+
+          rm -rf "$RUNNER_TEMP/dragon"
+          git clone --depth 1 --branch monster-base \
+            https://github.com/anonymouskeys/Dragon-vpn.git \
+            "$RUNNER_TEMP/dragon"
+
+          git -C "$RUNNER_TEMP/dragon" \
+            submodule update --init --depth 1 hev-socks5-tunnel
+
+          export NDK_HOME="$ANDROID_HOME/ndk/27.2.12479018"
+
+          cd "$RUNNER_TEMP/dragon"
+          chmod +x compile-byedpi.sh compile-hevtun.sh
+          ./compile-byedpi.sh
+          ./compile-hevtun.sh
+
+          cd "$GITHUB_WORKSPACE"
+          rm -rf app/src/main/jniLibs
+
+          for abi in arm64-v8a armeabi-v7a x86 x86_64; do
+            mkdir -p "app/src/main/jniLibs/$abi"
+
+            cp "$RUNNER_TEMP/dragon/V2rayNG/app/libs/$abi/libciadpi.so" \
+              "app/src/main/jniLibs/$abi/libciadpi.so"
+
+            cp "$RUNNER_TEMP/dragon/libs/$abi/libhev-socks5-tunnel.so" \
+              "app/src/main/jniLibs/$abi/libhev-socks5-tunnel.so"
+          done
+
+          find app/src/main/jniLibs -type f -maxdepth 3 -print
+
       - name: Build universal APK
         run: |
           chmod +x gradlew
           ./gradlew clean assembleDebug --no-daemon
           mkdir -p dist
-          cp app/build/outputs/apk/debug/app-debug.apk dist/X-dns-universal.apk
+          cp app/build/outputs/apk/debug/app-debug.apk dist/X-dns-universal-v0.3.apk
 
-      - name: Upload APK
+      - name: Upload universal APK
         uses: actions/upload-artifact@v4
         with:
-          name: X-dns-universal
-          path: dist/X-dns-universal.apk
+          name: X-dns-universal-v0.3
+          path: dist/X-dns-universal-v0.3.apk
+          if-no-files-found: error

@@ -20,7 +20,6 @@ import android.widget.ArrayAdapter;
 import android.widget.Button;
 import android.widget.EditText;
 import android.widget.LinearLayout;
-import android.widget.ProgressBar;
 import android.widget.ScrollView;
 import android.widget.Spinner;
 import android.widget.TextView;
@@ -44,7 +43,8 @@ public class MainActivity extends Activity {
     private static final int VPN_REQUEST = 1001;
     private static final String KEY_CUSTOM_DOH = "custom_doh";
 
-    private static final LinkedHashMap<String, String> BUILTIN_DOH = new LinkedHashMap<>();
+    private static final LinkedHashMap<String, String> BUILTIN_DOH =
+            new LinkedHashMap<>();
 
     static {
         BUILTIN_DOH.put("Xfinity", "https://doh.xfinity.com/dns-query");
@@ -62,14 +62,19 @@ public class MainActivity extends Activity {
     private final Handler handler = new Handler(Looper.getMainLooper());
 
     private SharedPreferences prefs;
+
+    private Spinner modeSpinner;
     private Spinner dohSpinner;
     private EditText customDoh;
+    private EditText dpiTtl;
+
     private TextView status;
     private TextView activeDoh;
     private TextView stats;
     private TextView speed;
     private TextView testResult;
     private TextView logText;
+
     private Button toggle;
 
     private final ArrayList<String> optionUrls = new ArrayList<>();
@@ -82,9 +87,14 @@ public class MainActivity extends Activity {
     @Override
     protected void onCreate(Bundle savedInstanceState) {
         super.onCreate(savedInstanceState);
+
         prefs = getSharedPreferences(XDnsVpnService.PREFS, MODE_PRIVATE);
+
+        seedResolvers();
         buildUi();
         loadDohOptions();
+        loadMode();
+
         updateUi();
         handler.post(uiTicker);
     }
@@ -93,6 +103,17 @@ public class MainActivity extends Activity {
     protected void onDestroy() {
         handler.removeCallbacks(uiTicker);
         super.onDestroy();
+    }
+
+    private void seedResolvers() {
+        for (Map.Entry<String, String> entry : BUILTIN_DOH.entrySet()) {
+            ResolverStore.seed(
+                    prefs,
+                    entry.getKey(),
+                    entry.getValue(),
+                    "builtin"
+            );
+        }
     }
 
     private void buildUi() {
@@ -111,7 +132,11 @@ public class MainActivity extends Activity {
         title.setGravity(Gravity.CENTER_HORIZONTAL);
         root.addView(title);
 
-        TextView subtitle = text("DoH local VPN • v0.2.1", 15, Color.rgb(170, 174, 185));
+        TextView subtitle = text(
+                "DoH + Dragon DPI • v0.3",
+                15,
+                Color.rgb(170, 174, 185)
+        );
         subtitle.setGravity(Gravity.CENTER_HORIZONTAL);
         root.addView(subtitle);
 
@@ -125,6 +150,50 @@ public class MainActivity extends Activity {
         activeDoh.setPadding(0, 0, 0, dp(14));
         root.addView(activeDoh);
 
+        root.addView(section("Mode"));
+
+        modeSpinner = new Spinner(this);
+        ArrayAdapter<String> modeAdapter = new ArrayAdapter<>(
+                this,
+                android.R.layout.simple_spinner_item,
+                new String[]{
+                        "DoH only — selected encrypted DNS",
+                        "Dragon DPI — Maximum/Auto full traffic"
+                }
+        );
+        modeAdapter.setDropDownViewResource(
+                android.R.layout.simple_spinner_dropdown_item
+        );
+        modeSpinner.setAdapter(modeAdapter);
+        root.addView(modeSpinner, fullWidth(dp(56)));
+
+        modeSpinner.setOnItemSelectedListener(
+                new android.widget.AdapterView.OnItemSelectedListener() {
+                    @Override
+                    public void onItemSelected(
+                            android.widget.AdapterView<?> parent,
+                            View view,
+                            int position,
+                            long id
+                    ) {
+                        prefs.edit()
+                                .putString(
+                                        XDnsVpnService.KEY_MODE,
+                                        position == 1
+                                                ? XDnsVpnService.MODE_DRAGON_DPI
+                                                : XDnsVpnService.MODE_DOH
+                                )
+                                .apply();
+                    }
+
+                    @Override
+                    public void onNothingSelected(
+                            android.widget.AdapterView<?> parent
+                    ) {
+                    }
+                }
+        );
+
         toggle = button("START");
         root.addView(toggle, matchButtonParams());
 
@@ -133,9 +202,11 @@ public class MainActivity extends Activity {
                 Intent stop = new Intent(this, XDnsVpnService.class);
                 stop.setAction(XDnsVpnService.ACTION_STOP);
                 startService(stop);
+
                 status.setText("STOPPING…");
-                handler.postDelayed(this::updateUi, 400);
+                handler.postDelayed(this::updateUi, 500);
             } else {
+                saveSettings();
                 requestVpn();
             }
         });
@@ -143,7 +214,7 @@ public class MainActivity extends Activity {
         root.addView(section("DNS over HTTPS"));
 
         dohSpinner = new Spinner(this);
-        root.addView(dohSpinner, fullWidth(dp(56)));
+        root.addView(dohSpinner, fullWidth(dp(58)));
 
         customDoh = new EditText(this);
         customDoh.setHint("https://example.org/dns-query");
@@ -153,8 +224,10 @@ public class MainActivity extends Activity {
         root.addView(customDoh, fullWidth(dp(54)));
 
         LinearLayout dnsButtons = horizontal();
+
         Button addDoh = button("ADD CUSTOM");
         Button testDoh = button("TEST SELECTED");
+
         dnsButtons.addView(addDoh, weighted());
         dnsButtons.addView(testDoh, weighted());
         root.addView(dnsButtons);
@@ -162,31 +235,59 @@ public class MainActivity extends Activity {
         Button testBuiltins = button("TEST ALL BUILT-IN DOH");
         root.addView(testBuiltins, matchButtonParams());
 
-        Button discover = button("FIND FREE DOH ONLINE");
+        Button discover = button("FIND + TEST FREE DOH ONLINE");
         root.addView(discover, matchButtonParams());
 
-        testResult = text("DoH test: not run", 14, Color.rgb(180, 185, 198));
+        Button statusDb = button("SAVED RESOLVER STATUS");
+        root.addView(statusDb, matchButtonParams());
+
+        testResult = text(
+                "Resolver database: ready",
+                14,
+                Color.rgb(180, 185, 198)
+        );
         testResult.setPadding(0, dp(8), 0, 0);
         root.addView(testResult);
 
         addDoh.setOnClickListener(v -> addCustomDoh());
         testDoh.setOnClickListener(v -> testCurrentDoh());
         testBuiltins.setOnClickListener(v -> testBuiltins());
-        discover.setOnClickListener(v -> discoverFreeDoh());
+        discover.setOnClickListener(v -> discoverAndTest());
+        statusDb.setOnClickListener(v -> showResolverStatus());
+
+        root.addView(section("Dragon DPI"));
+
+        TextView dpiInfo = text(
+                "Strategy: exact DragonVPN Auto/Maximum cascade",
+                14,
+                Color.rgb(180, 185, 198)
+        );
+        root.addView(dpiInfo);
+
+        dpiTtl = new EditText(this);
+        dpiTtl.setSingleLine(true);
+        dpiTtl.setHint("Fake TTL (default 8)");
+        dpiTtl.setTextColor(Color.WHITE);
+        dpiTtl.setHintTextColor(Color.rgb(120, 125, 135));
+        dpiTtl.setInputType(android.text.InputType.TYPE_CLASS_NUMBER);
+        dpiTtl.setText(prefs.getString(XDnsVpnService.KEY_DPI_TTL, "8"));
+        root.addView(dpiTtl, fullWidth(dp(54)));
+
+        TextView modeNote = text(
+                "v0.3 first proves the full Dragon DPI route. "
+                        + "DoH-only mode uses your selected DoH. "
+                        + "The native DoH+full-TUN merge is the next layer.",
+                13,
+                Color.rgb(255, 190, 110)
+        );
+        modeNote.setPadding(0, dp(6), 0, 0);
+        root.addView(modeNote);
 
         root.addView(section("Applications"));
 
         Button exclusions = button("EXCLUDE APPS");
         root.addView(exclusions, matchButtonParams());
         exclusions.setOnClickListener(v -> showAppExclusions());
-
-        TextView excludedHint = text(
-                "Excluded apps bypass X-dns completely. Restart X-dns after changing the list.",
-                13,
-                Color.rgb(150, 155, 165)
-        );
-        excludedHint.setPadding(0, dp(6), 0, 0);
-        root.addView(excludedHint);
 
         root.addView(section("Connection statistics"));
 
@@ -198,7 +299,7 @@ public class MainActivity extends Activity {
         speed.setPadding(0, dp(6), 0, 0);
         root.addView(speed);
 
-        root.addView(section("DNS log"));
+        root.addView(section("Log"));
 
         Button clear = button("CLEAR LOG");
         root.addView(clear, matchButtonParams());
@@ -207,7 +308,11 @@ public class MainActivity extends Activity {
             updateUi();
         });
 
-        logText = text("No DNS queries yet.", 12, Color.rgb(205, 208, 215));
+        logText = text(
+                "No events yet.",
+                12,
+                Color.rgb(205, 208, 215)
+        );
         logText.setTypeface(android.graphics.Typeface.MONOSPACE);
         logText.setTextIsSelectable(true);
         logText.setPadding(0, dp(10), 0, dp(20));
@@ -216,26 +321,53 @@ public class MainActivity extends Activity {
         setContentView(scroll);
     }
 
+    private void loadMode() {
+        String mode = prefs.getString(
+                XDnsVpnService.KEY_MODE,
+                XDnsVpnService.MODE_DOH
+        );
+
+        modeSpinner.setSelection(
+                XDnsVpnService.MODE_DRAGON_DPI.equals(mode) ? 1 : 0
+        );
+    }
+
     private void loadDohOptions() {
+        String selected = prefs.getString(
+                XDnsVpnService.KEY_DOH_URL,
+                XDnsVpnService.DEFAULT_DOH
+        );
+
         optionUrls.clear();
         optionLabels.clear();
 
+        // Built-ins, always visible, with persistent test status.
         for (Map.Entry<String, String> entry : BUILTIN_DOH.entrySet()) {
-            optionLabels.add(entry.getKey() + "\n" + entry.getValue());
-            optionUrls.add(entry.getValue());
+            addResolverOption(entry.getKey(), entry.getValue());
         }
 
+        // User custom + discovered working endpoints survive restarts.
         Set<String> customs = new LinkedHashSet<>(
                 prefs.getStringSet(KEY_CUSTOM_DOH, Collections.emptySet())
         );
 
-        ArrayList<String> sortedCustom = new ArrayList<>(customs);
-        Collections.sort(sortedCustom);
+        for (ResolverStore.Entry e : ResolverStore.working(prefs)) {
+            if (!BUILTIN_DOH.containsValue(e.url)) {
+                customs.add(e.url);
+            }
+        }
 
-        for (String url : sortedCustom) {
+        ArrayList<String> sorted = new ArrayList<>(customs);
+        Collections.sort(sorted);
+
+        for (String url : sorted) {
             if (!optionUrls.contains(url)) {
-                optionLabels.add("Custom\n" + url);
-                optionUrls.add(url);
+                ResolverStore.Entry e = ResolverStore.get(prefs, url);
+
+                addResolverOption(
+                        e == null ? "Custom" : e.name,
+                        url
+                );
             }
         }
 
@@ -244,50 +376,80 @@ public class MainActivity extends Activity {
                 android.R.layout.simple_spinner_item,
                 optionLabels
         );
-        adapter.setDropDownViewResource(android.R.layout.simple_spinner_dropdown_item);
-        dohSpinner.setAdapter(adapter);
-
-        String selected = prefs.getString(
-                XDnsVpnService.KEY_DOH_URL,
-                XDnsVpnService.DEFAULT_DOH
+        adapter.setDropDownViewResource(
+                android.R.layout.simple_spinner_dropdown_item
         );
+
+        dohSpinner.setAdapter(adapter);
 
         int position = optionUrls.indexOf(selected);
         if (position < 0) position = 0;
         dohSpinner.setSelection(position);
 
-        dohSpinner.setOnItemSelectedListener(new android.widget.AdapterView.OnItemSelectedListener() {
-            @Override
-            public void onItemSelected(android.widget.AdapterView<?> parent,
-                                       View view, int position, long id) {
-                if (position >= 0 && position < optionUrls.size()) {
-                    prefs.edit()
-                            .putString(XDnsVpnService.KEY_DOH_URL, optionUrls.get(position))
-                            .apply();
-                    updateUi();
-                }
-            }
+        dohSpinner.setOnItemSelectedListener(
+                new android.widget.AdapterView.OnItemSelectedListener() {
+                    @Override
+                    public void onItemSelected(
+                            android.widget.AdapterView<?> parent,
+                            View view,
+                            int position,
+                            long id
+                    ) {
+                        if (position >= 0 && position < optionUrls.size()) {
+                            prefs.edit()
+                                    .putString(
+                                            XDnsVpnService.KEY_DOH_URL,
+                                            optionUrls.get(position)
+                                    )
+                                    .apply();
 
-            @Override
-            public void onNothingSelected(android.widget.AdapterView<?> parent) {
+                            updateUi();
+                        }
+                    }
+
+                    @Override
+                    public void onNothingSelected(
+                            android.widget.AdapterView<?> parent
+                    ) {
+                    }
+                }
+        );
+    }
+
+    private void addResolverOption(String fallbackName, String url) {
+        ResolverStore.Entry e = ResolverStore.get(prefs, url);
+
+        String prefix = "?";
+        String suffix = "";
+
+        if (e != null) {
+            prefix = e.statusPrefix();
+
+            if (ResolverStore.OK.equals(e.status)) {
+                suffix = " • " + e.latencyMs + " ms";
+            } else if (ResolverStore.FAIL.equals(e.status)) {
+                suffix = " • failed";
             }
-        });
+        }
+
+        optionUrls.add(url);
+        optionLabels.add(
+                prefix + " " + fallbackName + suffix + "\n" + url
+        );
     }
 
     private void addCustomDoh() {
         String url = customDoh.getText().toString().trim();
 
         if (!url.startsWith("https://") || url.length() < 12) {
-            Toast.makeText(this, "DoH URL must start with https://", Toast.LENGTH_LONG).show();
+            Toast.makeText(
+                    this,
+                    "DoH URL must start with https://",
+                    Toast.LENGTH_LONG
+            ).show();
             return;
         }
 
-        addCustomUrl(url);
-        customDoh.setText("");
-        Toast.makeText(this, "Custom DoH added.", Toast.LENGTH_SHORT).show();
-    }
-
-    private void addCustomUrl(String url) {
         Set<String> saved = new LinkedHashSet<>(
                 prefs.getStringSet(KEY_CUSTOM_DOH, Collections.emptySet())
         );
@@ -298,188 +460,44 @@ public class MainActivity extends Activity {
                 .putString(XDnsVpnService.KEY_DOH_URL, url)
                 .apply();
 
+        ResolverStore.seed(prefs, "Custom", url, "custom");
+
+        customDoh.setText("");
         loadDohOptions();
 
         int position = optionUrls.indexOf(url);
         if (position >= 0) dohSpinner.setSelection(position);
+
+        testUrl(url, "Custom", true);
     }
 
     private String currentDoh() {
         int position = dohSpinner.getSelectedItemPosition();
+
         if (position >= 0 && position < optionUrls.size()) {
             return optionUrls.get(position);
         }
-        return prefs.getString(XDnsVpnService.KEY_DOH_URL, XDnsVpnService.DEFAULT_DOH);
+
+        return prefs.getString(
+                XDnsVpnService.KEY_DOH_URL,
+                XDnsVpnService.DEFAULT_DOH
+        );
     }
 
     private void testCurrentDoh() {
-        final String endpoint = currentDoh();
-        testResult.setText("DoH test: testing…");
+        String url = currentDoh();
+        ResolverStore.Entry e = ResolverStore.get(prefs, url);
 
-        new Thread(() -> {
-            DohClient.Result result = DohClient.query(
-                    endpoint,
-                    DohClient.makeTestQuery("example.com")
-            );
-
-            runOnUiThread(() -> {
-                if (result.ok()) {
-                    String ip = DnsPacket.firstAddress(result.body);
-                    testResult.setText(
-                            "DoH test: OK • " + result.latencyMs + " ms • "
-                                    + result.method + " • example.com → " + ip
-                    );
-                    testResult.setTextColor(Color.rgb(88, 214, 141));
-                } else {
-                    testResult.setText(
-                            "DoH test: ERROR • "
-                                    + (result.error == null ? "unknown" : result.error)
-                                    + " • " + result.method
-                    );
-                    testResult.setTextColor(Color.rgb(255, 120, 120));
-                }
-            });
-        }, "xdns-test").start();
-    }
-
-    private void testBuiltins() {
-        final ArrayList<Map.Entry<String, String>> entries =
-                new ArrayList<>(BUILTIN_DOH.entrySet());
-
-        final ExecutorService pool = Executors.newFixedThreadPool(5);
-        final ArrayList<DohTestItem> results =
-                new ArrayList<>(Collections.nCopies(entries.size(), null));
-        final AtomicInteger remaining = new AtomicInteger(entries.size());
-
-        testResult.setText("Testing " + entries.size() + " built-in DoH servers…");
-        testResult.setTextColor(Color.rgb(180, 185, 198));
-
-        for (int i = 0; i < entries.size(); i++) {
-            final int index = i;
-            final Map.Entry<String, String> entry = entries.get(i);
-
-            pool.submit(() -> {
-                DohClient.Result result = DohClient.query(
-                        entry.getValue(),
-                        DohClient.makeTestQuery("example.com")
-                );
-
-                synchronized (results) {
-                    results.set(index, new DohTestItem(
-                            entry.getKey(),
-                            entry.getValue(),
-                            result
-                    ));
-                }
-
-                if (remaining.decrementAndGet() == 0) {
-                    pool.shutdown();
-                    runOnUiThread(() -> showDohTestResults(results));
-                }
-            });
-        }
-    }
-
-    private void showDohTestResults(List<DohTestItem> source) {
-        ArrayList<DohTestItem> results = new ArrayList<>(source);
-
-        results.sort((a, b) -> {
-            if (a.result.ok() != b.result.ok()) return a.result.ok() ? -1 : 1;
-            return Long.compare(a.result.latencyMs, b.result.latencyMs);
-        });
-
-        String[] labels = new String[results.size()];
-
-        for (int i = 0; i < results.size(); i++) {
-            DohTestItem item = results.get(i);
-            String prefix = item.result.ok() ? "✓ " : "✗ ";
-            labels[i] = prefix + item.name + " • " + item.result.shortStatus()
-                    + "\n" + item.url;
-        }
-
-        new AlertDialog.Builder(this)
-                .setTitle("Built-in DoH test")
-                .setItems(labels, (dialog, which) -> {
-                    DohTestItem selected = results.get(which);
-
-                    if (selected.result.ok()) {
-                        prefs.edit()
-                                .putString(XDnsVpnService.KEY_DOH_URL, selected.url)
-                                .apply();
-                        loadDohOptions();
-                        Toast.makeText(
-                                this,
-                                "Selected: " + selected.name,
-                                Toast.LENGTH_SHORT
-                        ).show();
-                    } else {
-                        Toast.makeText(
-                                this,
-                                "That resolver failed on this network.",
-                                Toast.LENGTH_LONG
-                        ).show();
-                    }
-                })
-                .setPositiveButton("CLOSE", null)
-                .show();
-
-        long working = results.stream().filter(x -> x.result.ok()).count();
-        testResult.setText(
-                "Built-ins: " + working + "/" + results.size() + " working"
-        );
-        testResult.setTextColor(
-                working > 0 ? Color.rgb(88, 214, 141) : Color.rgb(255, 120, 120)
+        testUrl(
+                url,
+                e == null ? "Selected" : e.name,
+                false
         );
     }
 
-    private void discoverFreeDoh() {
-        testResult.setText("Downloading public DoH catalog…");
+    private void testUrl(String url, String name, boolean selectOnSuccess) {
+        testResult.setText("Testing " + url + " …");
         testResult.setTextColor(Color.rgb(180, 185, 198));
-
-        new Thread(() -> {
-            try {
-                List<String> urls = DohCatalog.fetchPublicDohUrls();
-
-                runOnUiThread(() -> showDiscoveredUrls(urls));
-            } catch (Exception e) {
-                runOnUiThread(() -> {
-                    testResult.setText("Catalog error: " + safeMessage(e));
-                    testResult.setTextColor(Color.rgb(255, 120, 120));
-                });
-            }
-        }, "xdns-catalog").start();
-    }
-
-    private void showDiscoveredUrls(List<String> urls) {
-        if (urls == null || urls.isEmpty()) {
-            testResult.setText("Catalog returned no DoH URLs.");
-            testResult.setTextColor(Color.rgb(255, 120, 120));
-            return;
-        }
-
-        // Keep the dialog manageable; the source may contain hundreds.
-        int max = Math.min(urls.size(), 120);
-        String[] labels = new String[max];
-
-        for (int i = 0; i < max; i++) {
-            labels[i] = urls.get(i);
-        }
-
-        testResult.setText("Found " + urls.size() + " public DoH endpoints.");
-        testResult.setTextColor(Color.rgb(88, 214, 141));
-
-        new AlertDialog.Builder(this)
-                .setTitle("Free public DoH catalog (" + urls.size() + ")")
-                .setItems(labels, (dialog, which) -> {
-                    String url = labels[which];
-                    testAndOfferDiscovered(url);
-                })
-                .setNegativeButton("CLOSE", null)
-                .show();
-    }
-
-    private void testAndOfferDiscovered(String url) {
-        testResult.setText("Testing discovered DoH… " + url);
 
         new Thread(() -> {
             DohClient.Result result = DohClient.query(
@@ -487,33 +505,280 @@ public class MainActivity extends Activity {
                     DohClient.makeTestQuery("example.com")
             );
 
-            runOnUiThread(() -> {
-                if (result.ok()) {
-                    String ip = DnsPacket.firstAddress(result.body);
+            ResolverStore.saveResult(prefs, url, name, result);
 
-                    new AlertDialog.Builder(this)
-                            .setTitle("Working DoH")
-                            .setMessage(
-                                    url + "\n\n"
-                                            + result.latencyMs + " ms • "
-                                            + result.method
-                                            + "\nexample.com → " + ip
-                            )
-                            .setNegativeButton("CANCEL", null)
-                            .setPositiveButton("ADD & SELECT", (d, w) -> {
-                                addCustomUrl(url);
-                                testResult.setText("Selected working DoH: " + url);
-                                testResult.setTextColor(Color.rgb(88, 214, 141));
-                            })
-                            .show();
+            if (result.ok() && selectOnSuccess) {
+                Set<String> saved = new LinkedHashSet<>(
+                        prefs.getStringSet(KEY_CUSTOM_DOH, Collections.emptySet())
+                );
+                saved.add(url);
+
+                prefs.edit()
+                        .putStringSet(KEY_CUSTOM_DOH, saved)
+                        .putString(XDnsVpnService.KEY_DOH_URL, url)
+                        .apply();
+            }
+
+            runOnUiThread(() -> {
+                loadDohOptions();
+
+                if (result.ok()) {
+                    testResult.setText(
+                            "✓ " + name + " • "
+                                    + result.latencyMs + " ms • "
+                                    + result.method
+                    );
+                    testResult.setTextColor(Color.rgb(88, 214, 141));
                 } else {
                     testResult.setText(
-                            "Discovered DoH failed: " + result.shortStatus()
+                            "✗ " + name + " • "
+                                    + (result.error == null ? "failed" : result.error)
                     );
                     testResult.setTextColor(Color.rgb(255, 120, 120));
                 }
             });
-        }, "xdns-discovered-test").start();
+        }, "xdns-resolver-test").start();
+    }
+
+    private void testBuiltins() {
+        final ArrayList<Map.Entry<String, String>> entries =
+                new ArrayList<>(BUILTIN_DOH.entrySet());
+
+        final ExecutorService pool = Executors.newFixedThreadPool(5);
+        final AtomicInteger remaining = new AtomicInteger(entries.size());
+        final AtomicInteger working = new AtomicInteger();
+
+        testResult.setText(
+                "Testing built-ins: 0/" + entries.size()
+        );
+
+        for (Map.Entry<String, String> entry : entries) {
+            pool.submit(() -> {
+                DohClient.Result result = DohClient.query(
+                        entry.getValue(),
+                        DohClient.makeTestQuery("example.com")
+                );
+
+                ResolverStore.saveResult(
+                        prefs,
+                        entry.getValue(),
+                        entry.getKey(),
+                        result
+                );
+
+                if (result.ok()) working.incrementAndGet();
+
+                int done = entries.size() - remaining.decrementAndGet();
+
+                runOnUiThread(() -> {
+                    testResult.setText(
+                            "Testing built-ins: "
+                                    + done + "/" + entries.size()
+                                    + " • working " + working.get()
+                    );
+
+                    if (done == entries.size()) {
+                        loadDohOptions();
+                        showResolverStatus();
+                    }
+                });
+
+                if (remaining.get() == 0) pool.shutdown();
+            });
+        }
+    }
+
+    private void discoverAndTest() {
+        testResult.setText("Downloading public DoH catalog…");
+        testResult.setTextColor(Color.rgb(180, 185, 198));
+
+        new Thread(() -> {
+            try {
+                List<String> urls = DohCatalog.fetchPublicDohUrls();
+
+                for (String url : urls) {
+                    ResolverStore.rememberDiscovered(prefs, url);
+                }
+
+                runOnUiThread(() -> {
+                    testResult.setText(
+                            "Saved " + urls.size()
+                                    + " discovered DoH endpoints. Testing…"
+                    );
+                    testDiscovered(urls);
+                });
+
+            } catch (Exception e) {
+                runOnUiThread(() -> {
+                    testResult.setText(
+                            "Catalog error: " + safeMessage(e)
+                    );
+                    testResult.setTextColor(Color.rgb(255, 120, 120));
+                });
+            }
+        }, "xdns-catalog").start();
+    }
+
+    private void testDiscovered(List<String> urls) {
+        if (urls == null || urls.isEmpty()) return;
+
+        // Keep enough concurrency to finish a large catalog without opening
+        // hundreds of simultaneous TLS handshakes.
+        final int workers = 12;
+        final ExecutorService pool = Executors.newFixedThreadPool(workers);
+        final AtomicInteger remaining = new AtomicInteger(urls.size());
+        final AtomicInteger working = new AtomicInteger();
+
+        for (String url : urls) {
+            pool.submit(() -> {
+                ResolverStore.Entry existing = ResolverStore.get(prefs, url);
+
+                String name = existing == null
+                        ? url
+                        : existing.name;
+
+                DohClient.Result result = DohClient.query(
+                        url,
+                        DohClient.makeTestQuery("example.com")
+                );
+
+                ResolverStore.saveResult(
+                        prefs,
+                        url,
+                        name,
+                        result
+                );
+
+                if (result.ok()) {
+                    working.incrementAndGet();
+
+                    Set<String> saved = new LinkedHashSet<>(
+                            prefs.getStringSet(
+                                    KEY_CUSTOM_DOH,
+                                    Collections.emptySet()
+                            )
+                    );
+                    saved.add(url);
+
+                    prefs.edit()
+                            .putStringSet(KEY_CUSTOM_DOH, saved)
+                            .apply();
+                }
+
+                int done = urls.size() - remaining.decrementAndGet();
+
+                if (done % 5 == 0 || done == urls.size()) {
+                    runOnUiThread(() -> {
+                        testResult.setText(
+                                "Public DoH: "
+                                        + done + "/" + urls.size()
+                                        + " tested • "
+                                        + working.get() + " working"
+                        );
+
+                        if (done == urls.size()) {
+                            loadDohOptions();
+                            testResult.setTextColor(
+                                    working.get() > 0
+                                            ? Color.rgb(88, 214, 141)
+                                            : Color.rgb(255, 120, 120)
+                            );
+                        }
+                    });
+                }
+
+                if (remaining.get() == 0) pool.shutdown();
+            });
+        }
+    }
+
+    private void showResolverStatus() {
+        ArrayList<ResolverStore.Entry> all =
+                new ArrayList<>(ResolverStore.all(prefs));
+
+        all.sort((a, b) -> {
+            int rankA = ResolverStore.OK.equals(a.status)
+                    ? 0
+                    : ResolverStore.UNKNOWN.equals(a.status) ? 1 : 2;
+
+            int rankB = ResolverStore.OK.equals(b.status)
+                    ? 0
+                    : ResolverStore.UNKNOWN.equals(b.status) ? 1 : 2;
+
+            if (rankA != rankB) return Integer.compare(rankA, rankB);
+
+            if (rankA == 0) {
+                return Long.compare(a.latencyMs, b.latencyMs);
+            }
+
+            return a.name.compareToIgnoreCase(b.name);
+        });
+
+        String[] labels = new String[all.size()];
+
+        for (int i = 0; i < all.size(); i++) {
+            labels[i] = all.get(i).displayLine();
+        }
+
+        new AlertDialog.Builder(this)
+                .setTitle("Saved resolver status (" + all.size() + ")")
+                .setItems(labels, (dialog, which) -> {
+                    ResolverStore.Entry e = all.get(which);
+
+                    if (ResolverStore.OK.equals(e.status)) {
+                        prefs.edit()
+                                .putString(
+                                        XDnsVpnService.KEY_DOH_URL,
+                                        e.url
+                                )
+                                .apply();
+
+                        Set<String> saved = new LinkedHashSet<>(
+                                prefs.getStringSet(
+                                        KEY_CUSTOM_DOH,
+                                        Collections.emptySet()
+                                )
+                        );
+                        saved.add(e.url);
+
+                        prefs.edit()
+                                .putStringSet(KEY_CUSTOM_DOH, saved)
+                                .apply();
+
+                        loadDohOptions();
+
+                        Toast.makeText(
+                                this,
+                                "Selected " + e.name,
+                                Toast.LENGTH_SHORT
+                        ).show();
+                    } else {
+                        testUrl(e.url, e.name, true);
+                    }
+                })
+                .setPositiveButton("CLOSE", null)
+                .show();
+    }
+
+    private void saveSettings() {
+        prefs.edit()
+                .putString(
+                        XDnsVpnService.KEY_DOH_URL,
+                        currentDoh()
+                )
+                .putString(
+                        XDnsVpnService.KEY_MODE,
+                        modeSpinner.getSelectedItemPosition() == 1
+                                ? XDnsVpnService.MODE_DRAGON_DPI
+                                : XDnsVpnService.MODE_DOH
+                )
+                .putString(
+                        XDnsVpnService.KEY_DPI_TTL,
+                        dpiTtl.getText().toString().trim().isEmpty()
+                                ? "8"
+                                : dpiTtl.getText().toString().trim()
+                )
+                .apply();
     }
 
     private void requestVpn() {
@@ -527,10 +792,6 @@ public class MainActivity extends Activity {
     }
 
     private void startVpn() {
-        prefs.edit()
-                .putString(XDnsVpnService.KEY_DOH_URL, currentDoh())
-                .apply();
-
         Intent service = new Intent(this, XDnsVpnService.class);
         service.setAction(XDnsVpnService.ACTION_START);
 
@@ -540,11 +801,15 @@ public class MainActivity extends Activity {
             startService(service);
         }
 
-        handler.postDelayed(this::updateUi, 350);
+        handler.postDelayed(this::updateUi, 500);
     }
 
     @Override
-    protected void onActivityResult(int requestCode, int resultCode, Intent data) {
+    protected void onActivityResult(
+            int requestCode,
+            int resultCode,
+            Intent data
+    ) {
         super.onActivityResult(requestCode, resultCode, data);
 
         if (requestCode == VPN_REQUEST && resultCode == RESULT_OK) {
@@ -558,16 +823,23 @@ public class MainActivity extends Activity {
         Intent launcher = new Intent(Intent.ACTION_MAIN);
         launcher.addCategory(Intent.CATEGORY_LAUNCHER);
 
-        List<ResolveInfo> resolved = pm.queryIntentActivities(launcher, 0);
-        LinkedHashMap<String, AppItem> unique = new LinkedHashMap<>();
+        List<ResolveInfo> resolved =
+                pm.queryIntentActivities(launcher, 0);
+
+        LinkedHashMap<String, AppItem> unique =
+                new LinkedHashMap<>();
 
         for (ResolveInfo info : resolved) {
-            if (info.activityInfo == null || info.activityInfo.packageName == null) continue;
+            if (info.activityInfo == null
+                    || info.activityInfo.packageName == null) {
+                continue;
+            }
 
             String pkg = info.activityInfo.packageName;
             if (pkg.equals(getPackageName())) continue;
 
             String label;
+
             try {
                 CharSequence cs = info.loadLabel(pm);
                 label = cs == null ? pkg : cs.toString();
@@ -578,10 +850,16 @@ public class MainActivity extends Activity {
             unique.put(pkg, new AppItem(label, pkg));
         }
 
-        ArrayList<AppItem> apps = new ArrayList<>(unique.values());
-        apps.sort(Comparator.comparing(
-                a -> a.label.toLowerCase(java.util.Locale.ROOT)
-        ));
+        ArrayList<AppItem> apps =
+                new ArrayList<>(unique.values());
+
+        apps.sort(
+                Comparator.comparing(
+                        a -> a.label.toLowerCase(
+                                java.util.Locale.ROOT
+                        )
+                )
+        );
 
         String[] labels = new String[apps.size()];
         boolean[] checked = new boolean[apps.size()];
@@ -592,63 +870,118 @@ public class MainActivity extends Activity {
                         Collections.emptySet()
                 )
         );
+
         Set<String> selected = new HashSet<>(saved);
 
         for (int i = 0; i < apps.size(); i++) {
             AppItem app = apps.get(i);
-            labels[i] = app.label + "\n" + app.packageName;
-            checked[i] = saved.contains(app.packageName);
+
+            labels[i] =
+                    app.label + "\n" + app.packageName;
+
+            checked[i] =
+                    saved.contains(app.packageName);
         }
 
         new AlertDialog.Builder(this)
                 .setTitle("Apps that bypass X-dns")
-                .setMultiChoiceItems(labels, checked, (dialog, which, isChecked) -> {
-                    String pkg = apps.get(which).packageName;
-                    if (isChecked) selected.add(pkg);
-                    else selected.remove(pkg);
-                })
-                .setNegativeButton("CANCEL", null)
-                .setPositiveButton("SAVE", (dialog, which) -> {
-                    prefs.edit()
-                            .putStringSet(
-                                    XDnsVpnService.KEY_EXCLUDED_APPS,
-                                    new HashSet<>(selected)
-                            )
-                            .apply();
+                .setMultiChoiceItems(
+                        labels,
+                        checked,
+                        (dialog, which, isChecked) -> {
+                            String pkg =
+                                    apps.get(which).packageName;
 
-                    Toast.makeText(
-                            this,
-                            XDnsVpnService.isRunning()
-                                    ? "Saved. Restart X-dns to apply exclusions."
-                                    : "Exclusions saved.",
-                            Toast.LENGTH_LONG
-                    ).show();
-                })
+                            if (isChecked) selected.add(pkg);
+                            else selected.remove(pkg);
+                        }
+                )
+                .setNegativeButton("CANCEL", null)
+                .setPositiveButton(
+                        "SAVE",
+                        (dialog, which) -> {
+                            prefs.edit()
+                                    .putStringSet(
+                                            XDnsVpnService.KEY_EXCLUDED_APPS,
+                                            new HashSet<>(selected)
+                                    )
+                                    .apply();
+
+                            Toast.makeText(
+                                    this,
+                                    XDnsVpnService.isRunning()
+                                            ? "Saved. Restart X-dns to apply."
+                                            : "Exclusions saved.",
+                                    Toast.LENGTH_LONG
+                            ).show();
+                        }
+                )
                 .show();
     }
 
     private void updateUi() {
-        boolean running = XDnsVpnService.isRunning();
+        boolean running =
+                XDnsVpnService.isRunning();
 
         if (running) {
-            status.setText("DNS VPN ACTIVE");
-            status.setTextColor(Color.rgb(88, 214, 141));
+            if (XDnsVpnService.MODE_DRAGON_DPI.equals(
+                    XDnsVpnService.runningMode()
+            )) {
+                status.setText("DRAGON DPI ACTIVE");
+            } else {
+                status.setText("DOH VPN ACTIVE");
+            }
+
+            status.setTextColor(
+                    Color.rgb(88, 214, 141)
+            );
+
             toggle.setText("STOP");
+
         } else {
-            status.setText("DNS VPN OFF");
-            status.setTextColor(Color.rgb(255, 120, 120));
+            status.setText("VPN OFF");
+            status.setTextColor(
+                    Color.rgb(255, 120, 120)
+            );
             toggle.setText("START");
         }
 
-        activeDoh.setText(
-                "Selected DoH: "
-                        + prefs.getString(
-                                XDnsVpnService.KEY_DOH_URL,
-                                XDnsVpnService.DEFAULT_DOH
-                        )
+        String selected = prefs.getString(
+                XDnsVpnService.KEY_DOH_URL,
+                XDnsVpnService.DEFAULT_DOH
         );
 
-        stats.setText(DnsLog.statsText());
+        ResolverStore.Entry e =
+                ResolverStore.get(prefs, selected);
+
+        activeDoh.setText(
+                "Selected DoH: "
+                        + (e == null ? "" : e.statusPrefix() + " ")
+                        + selected
+        );
+
+        if (running
+                && XDnsVpnService.MODE_DRAGON_DPI.equals(
+                        XDnsVpnService.runningMode()
+                )) {
+
+            long[] d = XDnsVpnService.getDpiStats();
+
+            // hev stats: [tx packets, tx bytes, rx packets, rx bytes]
+            stats.setText(
+                    "Dragon Maximum: active"
+                            + "\nTUN TX: " + DnsLog.formatBytes(d.length > 1 ? d[1] : 0)
+                            + "   RX: " + DnsLog.formatBytes(d.length > 3 ? d[3] : 0)
+                            + "\nPackets TX/RX: "
+                            + (d.length > 0 ? d[0] : 0)
+                            + " / "
+                            + (d.length > 2 ? d[2] : 0)
+            );
+
+        } else {
+            stats.setText(DnsLog.statsText());
+        }
+
         logText.setText(DnsLog.getText());
         updateSpeed();
     }
@@ -663,15 +996,31 @@ public class MainActivity extends Activity {
             return;
         }
 
-        if (lastRx >= 0 && lastTx >= 0 && lastSpeedSample > 0 && now > lastSpeedSample) {
-            double seconds = (now - lastSpeedSample) / 1000.0;
-            long rxRate = Math.max(0, (long) ((rx - lastRx) / seconds));
-            long txRate = Math.max(0, (long) ((tx - lastTx) / seconds));
+        if (lastRx >= 0
+                && lastTx >= 0
+                && lastSpeedSample > 0
+                && now > lastSpeedSample) {
+
+            double seconds =
+                    (now - lastSpeedSample) / 1000.0;
+
+            long rxRate = Math.max(
+                    0,
+                    (long) ((rx - lastRx) / seconds)
+            );
+
+            long txRate = Math.max(
+                    0,
+                    (long) ((tx - lastTx) / seconds)
+            );
 
             speed.setText(
-                    "Device speed: ↓ " + formatRate(rxRate)
-                            + "   ↑ " + formatRate(txRate)
+                    "Device speed: ↓ "
+                            + formatRate(rxRate)
+                            + "   ↑ "
+                            + formatRate(txRate)
             );
+
         } else {
             speed.setText("Device speed: measuring…");
         }
@@ -681,59 +1030,110 @@ public class MainActivity extends Activity {
         lastSpeedSample = now;
     }
 
-    private final Runnable uiTicker = new Runnable() {
-        @Override
-        public void run() {
-            updateUi();
-            handler.postDelayed(this, 1000);
-        }
-    };
+    private final Runnable uiTicker =
+            new Runnable() {
+                @Override
+                public void run() {
+                    updateUi();
+                    handler.postDelayed(this, 1000);
+                }
+            };
 
     private String formatRate(long bytesPerSecond) {
-        if (bytesPerSecond < 1024) return bytesPerSecond + " B/s";
-        double kib = bytesPerSecond / 1024.0;
-        if (kib < 1024) {
-            return String.format(java.util.Locale.US, "%.1f KiB/s", kib);
+        if (bytesPerSecond < 1024) {
+            return bytesPerSecond + " B/s";
         }
-        return String.format(java.util.Locale.US, "%.2f MiB/s", kib / 1024.0);
+
+        double kib =
+                bytesPerSecond / 1024.0;
+
+        if (kib < 1024) {
+            return String.format(
+                    java.util.Locale.US,
+                    "%.1f KiB/s",
+                    kib
+            );
+        }
+
+        return String.format(
+                java.util.Locale.US,
+                "%.2f MiB/s",
+                kib / 1024.0
+        );
     }
 
     private TextView section(String name) {
-        TextView view = text(name, 18, Color.WHITE);
-        view.setPadding(0, dp(28), 0, dp(10));
+        TextView view =
+                text(name, 18, Color.WHITE);
+
+        view.setPadding(
+                0,
+                dp(28),
+                0,
+                dp(10)
+        );
+
         return view;
     }
 
-    private TextView text(String value, float size, int color) {
-        TextView view = new TextView(this);
+    private TextView text(
+            String value,
+            float size,
+            int color
+    ) {
+        TextView view =
+                new TextView(this);
+
         view.setText(value);
         view.setTextSize(size);
         view.setTextColor(color);
+
         return view;
     }
 
     private Button button(String label) {
-        Button button = new Button(this);
+        Button button =
+                new Button(this);
+
         button.setText(label);
         button.setAllCaps(false);
         button.setTextSize(15);
+
         return button;
     }
 
     private LinearLayout horizontal() {
-        LinearLayout row = new LinearLayout(this);
-        row.setOrientation(LinearLayout.HORIZONTAL);
+        LinearLayout row =
+                new LinearLayout(this);
+
+        row.setOrientation(
+                LinearLayout.HORIZONTAL
+        );
+
         return row;
     }
 
     private LinearLayout.LayoutParams weighted() {
         LinearLayout.LayoutParams params =
-                new LinearLayout.LayoutParams(0, dp(52), 1f);
-        params.setMargins(dp(2), dp(4), dp(2), 0);
+                new LinearLayout.LayoutParams(
+                        0,
+                        dp(52),
+                        1f
+                );
+
+        params.setMargins(
+                dp(2),
+                dp(4),
+                dp(2),
+                0
+        );
+
         return params;
     }
 
-    private LinearLayout.LayoutParams fullWidth(int height) {
+    private LinearLayout.LayoutParams fullWidth(
+            int height
+    ) {
         return new LinearLayout.LayoutParams(
                 ViewGroup.LayoutParams.MATCH_PARENT,
                 height
@@ -741,18 +1141,34 @@ public class MainActivity extends Activity {
     }
 
     private LinearLayout.LayoutParams matchButtonParams() {
-        LinearLayout.LayoutParams params = fullWidth(dp(56));
-        params.setMargins(0, dp(4), 0, 0);
+        LinearLayout.LayoutParams params =
+                fullWidth(dp(56));
+
+        params.setMargins(
+                0,
+                dp(4),
+                0,
+                0
+        );
+
         return params;
     }
 
     private int dp(int value) {
-        return Math.round(value * getResources().getDisplayMetrics().density);
+        return Math.round(
+                value
+                        * getResources()
+                        .getDisplayMetrics()
+                        .density
+        );
     }
 
     private static String safeMessage(Exception e) {
-        String message = e.getMessage();
-        return message == null || message.trim().isEmpty()
+        String message =
+                e.getMessage();
+
+        return message == null
+                || message.trim().isEmpty()
                 ? e.getClass().getSimpleName()
                 : message;
     }
@@ -761,21 +1177,12 @@ public class MainActivity extends Activity {
         final String label;
         final String packageName;
 
-        AppItem(String label, String packageName) {
+        AppItem(
+                String label,
+                String packageName
+        ) {
             this.label = label;
             this.packageName = packageName;
-        }
-    }
-
-    private static final class DohTestItem {
-        final String name;
-        final String url;
-        final DohClient.Result result;
-
-        DohTestItem(String name, String url, DohClient.Result result) {
-            this.name = name;
-            this.url = url;
-            this.result = result;
         }
     }
 }

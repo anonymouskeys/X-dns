@@ -1,34 +1,66 @@
 # X-dns
 
-Experimental Android local VPN.
+Experimental Android local VPN combining a real DNS-over-HTTPS mode with a
+full-traffic Dragon/ByeDPI test mode.
 
-## v0.2.1
+## v0.3
 
-Hotfix for the real DNS-over-HTTPS layer:
+### Resolver database
 
-- explicit START / STOP service actions
-- robust DoH client based on OkHttp (HTTP/2 capable)
-- RFC 8484 wire-format POST with GET fallback
-- test selected DoH
-- test every built-in DoH and sort working resolvers by latency
-- online public DoH catalog discovery from the curl DoH wiki
-- add discovered/custom resolvers
-- DNS log, query/error/latency statistics
-- application exclusions
+- discovered public DoH endpoints are saved persistently
+- discovered endpoints are automatically tested in a bounded worker pool
+- working discovered endpoints survive app restarts
+- built-in resolver status survives app restarts
+- status database shows `✓`, `?`, or `✗`
+- working resolvers show saved latency and transport method
+- tapping a working resolver selects it
+- tapping a failed/unknown resolver retests it
 
-Built-in resolvers currently include Xfinity, Flatuslifir, Plan9 Hydra,
-Plan9 Draco, Cloudflare, Google, Quad9, AdGuard, DNS.SB and DNS4all.
+### Dragon DPI mode
 
-## Important
-
-v0.2.1 is still **DNS-only**. It does not yet contain ByeDPI/tun2socks.
-The next architecture step is a full-traffic mode:
+v0.3 integrates the same native path used by DragonVPN:
 
 ```text
-Apps -> X-dns TUN -> tun2socks -> local ByeDPI -> Internet
-              \
-               -> DoH engine
+Android apps
+    ↓
+VpnService full TUN
+    ↓
+hev-socks5-tunnel
+    ↓
+127.0.0.1:1080
+    ↓
+ciadpi / ByeDPI
+    ↓
+Internet
 ```
 
-That anti-DPI integration will require native Android/NDK code and GPL-3.0
-licensing for the combined work.
+The `Dragon DPI` mode uses the exact Auto/Maximum cascade from
+`anonymouskeys/Dragon-vpn` `ByeDpiManager.kt`, including `--auto-mode 1`,
+HTTP/TLS targeting and the working progressive Maximum strategy.
+
+The GitHub Actions build compiles the same Dragon native components for:
+
+- arm64-v8a
+- armeabi-v7a
+- x86
+- x86_64
+
+and packages them into one universal APK.
+
+### Important DNS note
+
+The DoH-only mode is fully connected to the selected DoH resolver.
+
+The Dragon DPI mode in v0.3 is intentionally a separate full-traffic proof:
+hev owns the TUN file descriptor, so the old Java DoH TUN reader cannot safely
+read that same FD at the same time. v0.3 therefore uses a normal VPN DNS server
+in Dragon DPI mode while proving the working Dragon/ByeDPI path.
+
+The next native layer is a DNS intercept/sidecar so selected DoH can be used
+inside the same full-traffic TUN without two readers racing on one TUN FD.
+
+## Licensing
+
+DragonVPN and ByeDPI components used by the native DPI build are GPL-3.0.
+X-dns is therefore intended to be distributed under GPL-3.0 when this mode is
+included.
