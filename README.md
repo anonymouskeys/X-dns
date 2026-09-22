@@ -1,24 +1,43 @@
 # X-dns
 
-Experimental Android local VPN combining a real DNS-over-HTTPS mode with a
-full-traffic Dragon/ByeDPI test mode.
+Experimental Android local VPN combining DNS-over-HTTPS discovery/benchmarking
+with a local Dragon/ByeDPI traffic path.
 
-## v0.3
+## v0.4
 
-### Resolver database
+### Persistent DoH database
 
-- discovered public DoH endpoints are saved persistently
-- discovered endpoints are automatically tested in a bounded worker pool
-- working discovered endpoints survive app restarts
-- built-in resolver status survives app restarts
-- status database shows `✓`, `?`, or `✗`
-- working resolvers show saved latency and transport method
-- tapping a working resolver selects it
-- tapping a failed/unknown resolver retests it
+`FIND + SAVE + TEST FREE DOH` now:
 
-### Dragon DPI mode
+1. downloads the public catalog,
+2. saves every discovered HTTPS DoH URL before testing,
+3. tests every saved URL,
+4. persists status, latency, success count and transport method,
+5. keeps working discovered resolvers available after app restart.
 
-v0.3 integrates the same native path used by DragonVPN:
+Resolver status uses:
+
+- `✓` working,
+- `?` not tested,
+- `✗` failed.
+
+### AUTO tuning
+
+`AUTO: BEST DOH + DPI FOR YOUTUBE`:
+
+1. loads the persistent resolver database,
+2. downloads/saves a catalog when none has been saved yet,
+3. ensures multiple DoH candidates work,
+4. re-benchmarks the fastest candidates using three DNS probes,
+5. keeps the best three stable DoH endpoints,
+6. starts local ciadpi with progressively stronger Dragon strategies,
+7. performs a real HTTPS probe to YouTube through the local SOCKS proxy,
+8. saves the best working DoH + DPI pair.
+
+The strategy order begins with simple split/disorder modes and ends with the
+same DragonVPN Maximum/Auto cascade used in `anonymouskeys/Dragon-vpn`.
+
+### Full Dragon traffic mode
 
 ```text
 Android apps
@@ -26,41 +45,22 @@ Android apps
 VpnService full TUN
     ↓
 hev-socks5-tunnel
+    ├─ internal mapdns for app DNS
     ↓
 127.0.0.1:1080
     ↓
-ciadpi / ByeDPI
+ciadpi / selected Dragon strategy
     ↓
 Internet
 ```
 
-The `Dragon DPI` mode uses the exact Auto/Maximum cascade from
-`anonymouskeys/Dragon-vpn` `ByeDpiManager.kt`, including `--auto-mode 1`,
-HTTP/TLS targeting and the working progressive Maximum strategy.
+HEV mapdns is used in the full-TUN mode so ordinary DNS packets are not sent as
+SOCKS UDP to ciadpi.
 
-The GitHub Actions build compiles the same Dragon native components for:
+### DoH mode
 
-- arm64-v8a
-- armeabi-v7a
-- x86
-- x86_64
+DoH-only mode still sends the intercepted Android DNS wire packet to the
+selected RFC 8484 HTTPS endpoint and writes the DNS response back to the TUN.
 
-and packages them into one universal APK.
-
-### Important DNS note
-
-The DoH-only mode is fully connected to the selected DoH resolver.
-
-The Dragon DPI mode in v0.3 is intentionally a separate full-traffic proof:
-hev owns the TUN file descriptor, so the old Java DoH TUN reader cannot safely
-read that same FD at the same time. v0.3 therefore uses a normal VPN DNS server
-in Dragon DPI mode while proving the working Dragon/ByeDPI path.
-
-The next native layer is a DNS intercept/sidecar so selected DoH can be used
-inside the same full-traffic TUN without two readers racing on one TUN FD.
-
-## Licensing
-
-DragonVPN and ByeDPI components used by the native DPI build are GPL-3.0.
-X-dns is therefore intended to be distributed under GPL-3.0 when this mode is
-included.
+The next networking layer will merge selected DoH into the same full-TUN path
+instead of HEV mapdns.

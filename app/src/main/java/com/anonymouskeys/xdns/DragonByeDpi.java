@@ -12,29 +12,37 @@ import java.util.Arrays;
 import java.util.List;
 import java.util.concurrent.TimeUnit;
 
-/**
- * Local ciadpi launcher using the exact Maximum/Auto cascade from DragonVPN.
- */
 public final class DragonByeDpi {
 
     public static final int PORT = 1080;
 
     private Process process;
     private Thread logThread;
+    private String activeStrategy = "";
 
     public synchronized boolean isRunning() {
         return process != null && process.isAlive();
     }
 
-    public synchronized void start(Context context, int fakeTtl) throws Exception {
+    public synchronized String activeStrategy() {
+        return activeStrategy;
+    }
+
+    public synchronized void start(Context context, int fakeTtl, String strategyId)
+            throws Exception {
         if (isRunning()) return;
 
-        File binary = new File(context.getApplicationInfo().nativeLibraryDir, "libciadpi.so");
+        File binary = new File(
+                context.getApplicationInfo().nativeLibraryDir,
+                "libciadpi.so"
+        );
+
         if (!binary.isFile()) {
             throw new IllegalStateException("libciadpi.so missing");
         }
 
-        int ttl = Math.max(1, Math.min(255, fakeTtl));
+        DpiStrategies.Preset preset =
+                DpiStrategies.find(strategyId, fakeTtl);
 
         List<String> command = new ArrayList<>(Arrays.asList(
                 binary.getAbsolutePath(),
@@ -48,36 +56,9 @@ public final class DragonByeDpi {
                 "--pf", "80-443"
         ));
 
-        // Exact working Maximum cascade from Dragon-vpn:
-        command.addAll(Arrays.asList(
-                "--disorder", "1", "--fake", "-1",
+        command.addAll(preset.args);
 
-                "--auto=torst",
-                "--split", "1+s",
-                "--disorder", "3+s",
-                "--fake", "-1",
-                "--ttl", String.valueOf(ttl),
-
-                "--auto=ssl_err",
-                "--fake", "-1",
-                "--ttl", String.valueOf(ttl),
-                "--fake-tls-mod", "rand",
-
-                "--auto=torst",
-                "--tlsrec", "3+s",
-                "--disorder", "1",
-
-                "--auto=torst",
-                "--disoob", "3+s",
-                "--disorder", "1",
-
-                "--auto=torst",
-                "--split", "1+s",
-                "--split", "3+s",
-                "--disorder", "5+s"
-        ));
-
-        DnsLog.addRaw("DPI • starting Dragon Maximum");
+        DnsLog.addRaw("DPI • starting " + preset.name);
 
         Process created = new ProcessBuilder(command)
                 .directory(context.getFilesDir())
@@ -85,10 +66,11 @@ public final class DragonByeDpi {
                 .start();
 
         process = created;
+        activeStrategy = preset.id;
 
         logThread = new Thread(() -> {
-            try (BufferedReader reader =
-                         new BufferedReader(new InputStreamReader(created.getInputStream()))) {
+            try (BufferedReader reader = new BufferedReader(
+                    new InputStreamReader(created.getInputStream()))) {
                 String line;
                 while ((line = reader.readLine()) != null) {
                     DnsLog.addRaw("DPI • " + line);
@@ -96,20 +78,26 @@ public final class DragonByeDpi {
             } catch (Exception ignored) {
             }
         }, "xdns-ciadpi-log");
+
         logThread.setDaemon(true);
         logThread.start();
 
         if (!waitForPort(created, 3500)) {
             stop();
-            throw new IllegalStateException("ciadpi did not open 127.0.0.1:" + PORT);
+            throw new IllegalStateException(
+                    "ciadpi did not open 127.0.0.1:" + PORT
+            );
         }
 
-        DnsLog.addRaw("DPI • Dragon Maximum ready on 127.0.0.1:" + PORT);
+        DnsLog.addRaw(
+                "DPI • " + preset.name + " ready on 127.0.0.1:" + PORT
+        );
     }
 
     public synchronized void stop() {
         Process current = process;
         process = null;
+        activeStrategy = "";
 
         if (current != null) {
             try {
@@ -130,8 +118,6 @@ public final class DragonByeDpi {
             logThread.interrupt();
             logThread = null;
         }
-
-        DnsLog.addRaw("DPI • stopped");
     }
 
     private static boolean waitForPort(Process process, long timeoutMs) {
@@ -141,7 +127,10 @@ public final class DragonByeDpi {
             if (!process.isAlive()) return false;
 
             try (Socket socket = new Socket()) {
-                socket.connect(new InetSocketAddress("127.0.0.1", PORT), 180);
+                socket.connect(
+                        new InetSocketAddress("127.0.0.1", PORT),
+                        180
+                );
                 return true;
             } catch (Exception ignored) {
                 try {

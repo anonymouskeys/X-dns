@@ -37,6 +37,7 @@ jobs:
           set -euxo pipefail
 
           rm -rf "$RUNNER_TEMP/dragon"
+
           git clone --depth 1 --branch monster-base \
             https://github.com/anonymouskeys/Dragon-vpn.git \
             "$RUNNER_TEMP/dragon"
@@ -47,11 +48,14 @@ jobs:
           export NDK_HOME="$ANDROID_HOME/ndk/27.2.12479018"
 
           cd "$RUNNER_TEMP/dragon"
+
           chmod +x compile-byedpi.sh compile-hevtun.sh
+
           ./compile-byedpi.sh
           ./compile-hevtun.sh
 
           cd "$GITHUB_WORKSPACE"
+
           rm -rf app/src/main/jniLibs
 
           for abi in arm64-v8a armeabi-v7a x86 x86_64; do
@@ -64,18 +68,17 @@ jobs:
               "app/src/main/jniLibs/$abi/libhev-socks5-tunnel.so"
           done
 
-          find app/src/main/jniLibs -type f -maxdepth 3 -print
-
       - name: Build universal APK
         run: |
           chmod +x gradlew
           ./gradlew clean assembleDebug --no-daemon
           mkdir -p dist
-          cp app/build/outputs/apk/debug/app-debug.apk dist/X-dns-universal-v0.3.apk
+          cp app/build/outputs/apk/debug/app-debug.apk \
+            dist/X-dns-universal-v0.4.apk
 
       - name: Upload universal APK
         uses: actions/upload-artifact@v4
         with:
-          name: X-dns-universal-v0.3
-          path: dist/X-dns-universal-v0.3.apk
+          name: X-dns-universal-v0.4
+          path: dist/X-dns-universal-v0.4.apk
           if-no-files-found: error

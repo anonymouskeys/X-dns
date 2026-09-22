@@ -13,7 +13,7 @@ import java.util.Map;
 
 public final class ResolverStore {
 
-    private static final String KEY_DB = "resolver_status_db_v1";
+    private static final String KEY_DB = "resolver_status_db_v2";
 
     public static final String UNKNOWN = "unknown";
     public static final String OK = "ok";
@@ -30,6 +30,8 @@ public final class ResolverStore {
         public String method = "";
         public String error = "";
         public long checkedAt;
+        public int attempts;
+        public int successes;
 
         public String statusPrefix() {
             if (OK.equals(status)) return "✓";
@@ -39,15 +41,39 @@ public final class ResolverStore {
 
         public String displayLine() {
             StringBuilder out = new StringBuilder();
-            out.append(statusPrefix()).append(" ").append(name);
+
+            out.append(statusPrefix())
+                    .append(" ")
+                    .append(name == null || name.isEmpty() ? url : name);
 
             if (OK.equals(status)) {
-                out.append(" • ").append(latencyMs).append(" ms");
-                if (method != null && !method.isEmpty()) {
-                    out.append(" • ").append(method);
+                out.append(" • ")
+                        .append(latencyMs)
+                        .append(" ms");
+
+                if (attempts > 0) {
+                    out.append(" • ")
+                            .append(successes)
+                            .append("/")
+                            .append(attempts);
                 }
-            } else if (FAIL.equals(status) && error != null && !error.isEmpty()) {
-                out.append(" • ").append(error);
+
+                if (method != null && !method.isEmpty()) {
+                    out.append(" • ")
+                            .append(method);
+                }
+            } else if (FAIL.equals(status)) {
+                if (attempts > 0) {
+                    out.append(" • ")
+                            .append(successes)
+                            .append("/")
+                            .append(attempts);
+                }
+
+                if (error != null && !error.isEmpty()) {
+                    out.append(" • ")
+                            .append(error);
+                }
             }
 
             out.append("\n").append(url);
@@ -97,17 +123,7 @@ public final class ResolverStore {
             DohClient.Result result
     ) {
         Map<String, Entry> db = load(prefs);
-
-        Entry e = db.get(url);
-        if (e == null) {
-            e = new Entry();
-            e.url = url;
-            e.name = fallbackName == null || fallbackName.isEmpty()
-                    ? hostName(url)
-                    : fallbackName;
-            e.source = "custom";
-            db.put(url, e);
-        }
+        Entry e = getOrCreate(db, url, fallbackName);
 
         e.status = result.ok() ? OK : FAIL;
         e.latencyMs = result.latencyMs;
@@ -116,30 +132,74 @@ public final class ResolverStore {
                 ? ""
                 : (result.error == null ? "failed" : result.error);
         e.checkedAt = System.currentTimeMillis();
+        e.attempts = 1;
+        e.successes = result.ok() ? 1 : 0;
 
         save(prefs, db);
     }
 
-    public static synchronized Entry get(SharedPreferences prefs, String url) {
+    public static synchronized void saveBenchmark(
+            SharedPreferences prefs,
+            String url,
+            String fallbackName,
+            int attempts,
+            int successes,
+            long medianLatencyMs,
+            String method,
+            String error
+    ) {
+        Map<String, Entry> db = load(prefs);
+        Entry e = getOrCreate(db, url, fallbackName);
+
+        e.attempts = Math.max(0, attempts);
+        e.successes = Math.max(0, successes);
+        e.latencyMs = Math.max(0, medianLatencyMs);
+        e.method = method == null ? "" : method;
+        e.error = error == null ? "" : error;
+        e.checkedAt = System.currentTimeMillis();
+
+        // At least two successful probes out of three is a stable resolver.
+        e.status = successes >= Math.max(1, (attempts + 1) / 2)
+                ? OK
+                : FAIL;
+
+        save(prefs, db);
+    }
+
+    public static synchronized Entry get(
+            SharedPreferences prefs,
+            String url
+    ) {
         return load(prefs).get(url);
     }
 
-    public static synchronized List<Entry> all(SharedPreferences prefs) {
+    public static synchronized List<Entry> all(
+            SharedPreferences prefs
+    ) {
         return new ArrayList<>(load(prefs).values());
     }
 
-    public static synchronized List<Entry> working(SharedPreferences prefs) {
+    public static synchronized List<Entry> working(
+            SharedPreferences prefs
+    ) {
         List<Entry> out = new ArrayList<>();
 
         for (Entry e : load(prefs).values()) {
             if (OK.equals(e.status)) out.add(e);
         }
 
-        out.sort((a, b) -> Long.compare(a.latencyMs, b.latencyMs));
+        out.sort((a, b) -> {
+            int c = Long.compare(a.latencyMs, b.latencyMs);
+            if (c != 0) return c;
+            return Integer.compare(b.successes, a.successes);
+        });
+
         return out;
     }
 
-    public static synchronized List<Entry> discovered(SharedPreferences prefs) {
+    public static synchronized List<Entry> discovered(
+            SharedPreferences prefs
+    ) {
         List<Entry> out = new ArrayList<>();
 
         for (Entry e : load(prefs).values()) {
@@ -149,11 +209,40 @@ public final class ResolverStore {
         return out;
     }
 
-    private static Map<String, Entry> load(SharedPreferences prefs) {
-        LinkedHashMap<String, Entry> out = new LinkedHashMap<>();
+    private static Entry getOrCreate(
+            Map<String, Entry> db,
+            String url,
+            String fallbackName
+    ) {
+        Entry e = db.get(url);
+
+        if (e == null) {
+            e = new Entry();
+            e.url = url;
+            e.name = fallbackName == null || fallbackName.isEmpty()
+                    ? hostName(url)
+                    : fallbackName;
+            e.source = "custom";
+            db.put(url, e);
+        } else if ((e.name == null || e.name.isEmpty())
+                && fallbackName != null
+                && !fallbackName.isEmpty()) {
+            e.name = fallbackName;
+        }
+
+        return e;
+    }
+
+    private static Map<String, Entry> load(
+            SharedPreferences prefs
+    ) {
+        LinkedHashMap<String, Entry> out =
+                new LinkedHashMap<>();
 
         try {
-            JSONArray array = new JSONArray(prefs.getString(KEY_DB, "[]"));
+            JSONArray array = new JSONArray(
+                    prefs.getString(KEY_DB, "[]")
+            );
 
             for (int i = 0; i < array.length(); i++) {
                 JSONObject o = array.getJSONObject(i);
@@ -167,8 +256,12 @@ public final class ResolverStore {
                 e.method = o.optString("method", "");
                 e.error = o.optString("error", "");
                 e.checkedAt = o.optLong("checkedAt", 0);
+                e.attempts = o.optInt("attempts", 0);
+                e.successes = o.optInt("successes", 0);
 
-                if (!e.url.isEmpty()) out.put(e.url, e);
+                if (!e.url.isEmpty()) {
+                    out.put(e.url, e);
+                }
             }
         } catch (Exception ignored) {
         }
@@ -176,12 +269,16 @@ public final class ResolverStore {
         return out;
     }
 
-    private static void save(SharedPreferences prefs, Map<String, Entry> db) {
+    private static void save(
+            SharedPreferences prefs,
+            Map<String, Entry> db
+    ) {
         JSONArray array = new JSONArray();
 
         try {
             for (Entry e : db.values()) {
                 JSONObject o = new JSONObject();
+
                 o.put("name", e.name == null ? "" : e.name);
                 o.put("url", e.url == null ? "" : e.url);
                 o.put("source", e.source == null ? "custom" : e.source);
@@ -190,18 +287,25 @@ public final class ResolverStore {
                 o.put("method", e.method == null ? "" : e.method);
                 o.put("error", e.error == null ? "" : e.error);
                 o.put("checkedAt", e.checkedAt);
+                o.put("attempts", e.attempts);
+                o.put("successes", e.successes);
+
                 array.put(o);
             }
         } catch (Exception ignored) {
         }
 
-        prefs.edit().putString(KEY_DB, array.toString()).apply();
+        prefs.edit()
+                .putString(KEY_DB, array.toString())
+                .apply();
     }
 
     private static String hostName(String url) {
         try {
             String host = URI.create(url).getHost();
-            return host == null || host.isEmpty() ? url : host;
+            return host == null || host.isEmpty()
+                    ? url
+                    : host;
         } catch (Exception e) {
             return url;
         }
