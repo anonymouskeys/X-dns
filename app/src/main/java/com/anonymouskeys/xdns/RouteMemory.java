@@ -235,6 +235,10 @@ public final class RouteMemory {
                 .remove(KEY_GOOD)
                 .remove("health_ok_youtube")
                 .remove("health_fail_youtube")
+                .remove("health_ok_youtube_control")
+                .remove("health_fail_youtube_control")
+                .remove("health_ok_youtube_media")
+                .remove("health_fail_youtube_media")
                 .remove("health_ok_instagram")
                 .remove("health_fail_instagram")
                 .remove("health_ok_tiktok")
@@ -248,9 +252,37 @@ public final class RouteMemory {
         load(prefs);
 
         return "Learned routes: " + GOOD.size()
-                + "\nTCP routes only — YouTube " + state(prefs, "youtube")
+                + "\nTLS-confirmed routes — YouTube " + youtubeState(prefs)
                 + "   Instagram " + state(prefs, "instagram")
                 + "   TikTok " + state(prefs, "tiktok");
+    }
+
+    private static String youtubeState(
+            SharedPreferences prefs
+    ) {
+        String control =
+                state(
+                        prefs,
+                        "youtube_control"
+                );
+
+        String media =
+                state(
+                        prefs,
+                        "youtube_media"
+                );
+
+        if ("✗".equals(control)
+                || "✗".equals(media)) {
+            return "✗";
+        }
+
+        if ("✓".equals(control)
+                && "✓".equals(media)) {
+            return "✓";
+        }
+
+        return "…";
     }
 
     private static String state(
@@ -293,10 +325,14 @@ public final class RouteMemory {
 
         String h = host.toLowerCase(Locale.ROOT);
 
+        if (h.endsWith("googlevideo.com")) {
+            return "youtube_media";
+        }
+
         if (h.contains("youtube")
-                || h.endsWith("googlevideo.com")
-                || h.endsWith("ytimg.com")) {
-            return "youtube";
+                || h.endsWith("ytimg.com")
+                || h.endsWith("googleapis.com")) {
+            return "youtube_control";
         }
 
         if (h.contains("instagram")

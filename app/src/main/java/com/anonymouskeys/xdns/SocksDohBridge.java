@@ -326,20 +326,6 @@ public final class SocksDohBridge {
                     connectedIp = "domain";
                     domainRescue = true;
 
-                    RouteMemory.domainSuccess(
-                            prefs,
-                            request.host,
-                            request.port
-                    );
-
-                    DnsLog.addRaw(
-                            "DOMAIN RESCUE ✓ • "
-                                    + request.host
-                                    + ":"
-                                    + request.port
-                                    + " • local edge via ciadpi"
-                    );
-
                 } catch (Exception e) {
                     last = e;
 
@@ -416,81 +402,31 @@ public final class SocksDohBridge {
             }
 
             ensureRunning();
-            boolean changed = false;
 
-            if (domainRescue) {
-                RouteMemory.domainSuccess(
-                        prefs,
-                        request.host,
-                        request.port
-                );
-            } else {
-                changed =
-                        RouteMemory.success(
-                                prefs,
-                                request.host,
-                                request.port,
-                                connectedIp
-                        );
-            }
+            boolean verifyTlsRoute =
+                    request.addressType == 0x03
+                            && request.port == 443
+                            && isTrackedHttpsHost(
+                            request.host
+                    );
 
-            boolean memoryHit =
-                    !domainRescue
-                            && rememberedBefore != null
-                            && rememberedBefore.equals(
-                                    connectedIp
-                            );
-
-            if (domainRescue) {
-                // DOMAIN RESCUE was already logged above.
-
-            } else if (changed) {
-                DnsLog.addRaw(
-                        "ROUTE LEARN ✓ • "
-                                + request.host
-                                + ":"
-                                + request.port
-                                + " → "
-                                + connectedIp
-                                + (rejected > 0
-                                ? " • "
-                                + rejected
-                                + " rejected first"
-                                : "")
-                );
-
-            } else if (rejected > 0) {
-                DnsLog.addRaw(
-                        "ROUTE RECOVER ✓ • "
-                                + request.host
-                                + ":"
-                                + request.port
-                                + " → "
-                                + connectedIp
-                                + " • "
-                                + rejected
-                                + " rejected"
-                );
-
-            } else if (memoryHit
-                    && (request.host.contains("youtube")
-                    || request.host.contains("googlevideo")
-                    || request.host.contains("instagram")
-                    || request.host.contains("facebook")
-                    || request.host.contains("tiktok"))) {
-
-                DnsLog.addRaw(
-                        "ROUTE MEMORY ✓ • "
-                                + request.host
-                                + " → "
-                                + connectedIp
+            if (!verifyTlsRoute) {
+                confirmRouteSuccess(
+                        request,
+                        connectedIp,
+                        domainRescue,
+                        rememberedBefore,
+                        rejected
                 );
             }
 
             sendReply(client, 0x00);
 
             client.setSoTimeout(0);
-            upstream.setSoTimeout(0);
+
+            if (!verifyTlsRoute) {
+                upstream.setSoTimeout(0);
+            }
 
             final Socket upstreamFinal = upstream;
 
@@ -502,10 +438,22 @@ public final class SocksDohBridge {
                             )
                     );
 
-            relay(
-                    upstreamFinal,
-                    client
-            );
+            if (verifyTlsRoute) {
+                relayHttpsAndConfirm(
+                        upstreamFinal,
+                        client,
+                        request,
+                        connectedIp,
+                        domainRescue,
+                        rememberedBefore,
+                        rejected
+                );
+            } else {
+                relay(
+                        upstreamFinal,
+                        client
+                );
+            }
 
             uplink.cancel(true);
 
@@ -534,6 +482,247 @@ public final class SocksDohBridge {
             closeQuietly(client);
             closeQuietly(upstream);
         }
+    }
+
+    private void confirmRouteSuccess(
+            Request request,
+            String connectedIp,
+            boolean domainRescue,
+            String rememberedBefore,
+            int rejected
+    ) {
+        boolean changed = false;
+
+        if (domainRescue) {
+            RouteMemory.domainSuccess(
+                    prefs,
+                    request.host,
+                    request.port
+            );
+        } else {
+            changed =
+                    RouteMemory.success(
+                            prefs,
+                            request.host,
+                            request.port,
+                            connectedIp
+                    );
+        }
+
+        boolean memoryHit =
+                !domainRescue
+                        && rememberedBefore != null
+                        && rememberedBefore.equals(
+                                connectedIp
+                        );
+
+        if (domainRescue) {
+            DnsLog.addRaw(
+                    "DOMAIN RESCUE ✓ • "
+                            + request.host
+                            + ":"
+                            + request.port
+                            + " • TLS confirmed"
+            );
+
+        } else if (changed) {
+            DnsLog.addRaw(
+                    "ROUTE LEARN ✓ • "
+                            + request.host
+                            + ":"
+                            + request.port
+                            + " → "
+                            + connectedIp
+                            + (rejected > 0
+                            ? " • "
+                            + rejected
+                            + " rejected first"
+                            : "")
+                            + (request.port == 443
+                            ? " • TLS confirmed"
+                            : "")
+            );
+
+        } else if (rejected > 0) {
+            DnsLog.addRaw(
+                    "ROUTE RECOVER ✓ • "
+                            + request.host
+                            + ":"
+                            + request.port
+                            + " → "
+                            + connectedIp
+                            + " • "
+                            + rejected
+                            + " rejected"
+                            + (request.port == 443
+                            ? " • TLS confirmed"
+                            : "")
+            );
+
+        } else if (memoryHit
+                && isTrackedHttpsHost(
+                request.host
+        )) {
+            DnsLog.addRaw(
+                    "ROUTE MEMORY ✓ • "
+                            + request.host
+                            + " → "
+                            + connectedIp
+                            + " • TLS confirmed"
+            );
+        }
+    }
+
+    private void relayHttpsAndConfirm(
+            Socket upstream,
+            Socket client,
+            Request request,
+            String connectedIp,
+            boolean domainRescue,
+            String rememberedBefore,
+            int rejected
+    ) {
+        boolean confirmed = false;
+
+        try {
+            upstream.setSoTimeout(6_000);
+
+            InputStream in =
+                    upstream.getInputStream();
+
+            OutputStream out =
+                    client.getOutputStream();
+
+            byte[] tlsHeader =
+                    readExact(
+                            in,
+                            5
+                    );
+
+            if (!looksLikeTlsServerResponse(
+                    tlsHeader
+            )) {
+                throw new IOException(
+                        "TLS server response rejected"
+                );
+            }
+
+            confirmRouteSuccess(
+                    request,
+                    connectedIp,
+                    domainRescue,
+                    rememberedBefore,
+                    rejected
+            );
+
+            confirmed = true;
+
+            out.write(tlsHeader);
+            out.flush();
+
+            upstream.setSoTimeout(0);
+
+            relay(
+                    upstream,
+                    client
+            );
+
+        } catch (Exception e) {
+            if (!confirmed) {
+                if (domainRescue) {
+                    RouteMemory.domainFailure(
+                            request.host,
+                            request.port
+                    );
+                } else if (connectedIp != null
+                        && !"domain".equals(
+                        connectedIp
+                )) {
+                    RouteMemory.failure(
+                            prefs,
+                            request.host,
+                            request.port,
+                            connectedIp
+                    );
+                }
+
+                RouteMemory.routeFailed(
+                        prefs,
+                        request.host
+                );
+
+                FastDoh.invalidate(
+                        request.host
+                );
+
+                if (RouteMemory.shouldLogFailure(
+                        request.host,
+                        request.port
+                )) {
+                    DnsLog.addRaw(
+                            "ROUTE TLS ✗ • "
+                                    + request.host
+                                    + ":"
+                                    + request.port
+                                    + " • "
+                                    + connectedIp
+                                    + " • "
+                                    + safeMessage(e)
+                    );
+                }
+            }
+
+        } finally {
+            try {
+                upstream.setSoTimeout(0);
+            } catch (Exception ignored) {
+            }
+        }
+    }
+
+    private static boolean looksLikeTlsServerResponse(
+            byte[] header
+    ) {
+        if (header == null
+                || header.length < 5) {
+            return false;
+        }
+
+        int type =
+                header[0] & 0xff;
+
+        int major =
+                header[1] & 0xff;
+
+        boolean recordType =
+                type == 20
+                        || type == 22
+                        || type == 23;
+
+        return recordType
+                && major == 3;
+    }
+
+    private static boolean isTrackedHttpsHost(
+            String host
+    ) {
+        if (host == null) return false;
+
+        String h =
+                host.toLowerCase(
+                        java.util.Locale.ROOT
+                );
+
+        return h.contains("youtube")
+                || h.endsWith("googlevideo.com")
+                || h.endsWith("ytimg.com")
+                || h.contains("instagram")
+                || h.endsWith("facebook.com")
+                || h.endsWith("fbcdn.net")
+                || h.contains("tiktok")
+                || h.contains("byteoversea")
+                || h.contains("ibytedtos")
+                || h.contains("musical.ly");
     }
 
     private void ensureRunning() throws IOException {
