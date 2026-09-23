@@ -2,12 +2,15 @@ package com.anonymouskeys.xdns;
 
 import android.app.Activity;
 import android.app.AlertDialog;
+import android.content.ClipData;
+import android.content.ClipboardManager;
 import android.content.Intent;
 import android.content.SharedPreferences;
 import android.content.pm.PackageManager;
 import android.content.pm.ResolveInfo;
 import android.graphics.Color;
 import android.net.TrafficStats;
+import android.net.Uri;
 import android.net.VpnService;
 import android.os.Build;
 import android.os.Bundle;
@@ -212,7 +215,7 @@ public class MainActivity extends Activity {
 
         TextView subtitle =
                 text(
-                        "DoH + Dragon DPI • Route Rescue • v0.6.2",
+                        "DoH + Dragon DPI • Route Rescue • v0.7.0",
                         15,
                         Color.rgb(170, 174, 185)
                 );
@@ -222,6 +225,64 @@ public class MainActivity extends Activity {
         );
 
         root.addView(subtitle);
+
+        TextView author =
+                text(
+                        "@anonymouskeys",
+                        15,
+                        Color.rgb(225, 230, 240)
+                );
+
+        author.setGravity(
+                Gravity.CENTER_HORIZONTAL
+        );
+
+        author.setPadding(
+                0,
+                dp(6),
+                0,
+                0
+        );
+
+        author.setOnClickListener(
+                v -> openTelegram()
+        );
+
+        author.setOnLongClickListener(v -> {
+            copyTelegramLink();
+            return true;
+        });
+
+        root.addView(author);
+
+        TextView telegram =
+                text(
+                        "https://t.me/anonymouskeys  •  tap: open  •  hold: copy",
+                        12,
+                        Color.rgb(100, 195, 255)
+                );
+
+        telegram.setGravity(
+                Gravity.CENTER_HORIZONTAL
+        );
+
+        telegram.setPadding(
+                0,
+                dp(3),
+                0,
+                0
+        );
+
+        telegram.setOnClickListener(
+                v -> openTelegram()
+        );
+
+        telegram.setOnLongClickListener(v -> {
+            copyTelegramLink();
+            return true;
+        });
+
+        root.addView(telegram);
 
         status =
                 text("", 21, Color.WHITE);
@@ -1988,6 +2049,59 @@ public class MainActivity extends Activity {
                         }
                 )
                 .show();
+    }
+
+    private void openTelegram() {
+        try {
+            Intent intent =
+                    new Intent(
+                            Intent.ACTION_VIEW,
+                            Uri.parse(
+                                    "https://t.me/anonymouskeys"
+                            )
+                    );
+
+            startActivity(intent);
+
+        } catch (Exception e) {
+            copyTelegramLink();
+
+            Toast.makeText(
+                    this,
+                    "Telegram link copied.",
+                    Toast.LENGTH_SHORT
+            ).show();
+        }
+    }
+
+    private void copyTelegramLink() {
+        ClipboardManager clipboard =
+                (ClipboardManager)
+                        getSystemService(
+                                CLIPBOARD_SERVICE
+                        );
+
+        if (clipboard == null) {
+            Toast.makeText(
+                    this,
+                    "Clipboard unavailable.",
+                    Toast.LENGTH_SHORT
+            ).show();
+            return;
+        }
+
+        clipboard.setPrimaryClip(
+                ClipData.newPlainText(
+                        "X-dns Telegram",
+                        "https://t.me/anonymouskeys"
+                )
+        );
+
+        Toast.makeText(
+                this,
+                "Copied: https://t.me/anonymouskeys",
+                Toast.LENGTH_SHORT
+        ).show();
     }
 
     private void updateUi() {
