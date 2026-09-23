@@ -19,8 +19,8 @@ import java.util.concurrent.TimeUnit;
 
 public final class FastDoh {
 
-    private static final int FALLBACK_RESOLVERS = 4;
-    private static final long FALLBACK_TIMEOUT_MS = 1800;
+    private static final int FALLBACK_RESOLVERS = 8;
+    private static final long FALLBACK_TIMEOUT_MS = 2800;
     private static final long CACHE_TTL_MS = 180_000;
 
     private static final ExecutorService POOL =
@@ -330,6 +330,16 @@ public final class FastDoh {
         return new ArrayList<>(unique);
     }
 
+    public static void invalidate(
+            String host
+    ) {
+        if (host == null) return;
+
+        ADDRESS_CACHE.remove(
+                host.toLowerCase(Locale.ROOT)
+        );
+    }
+
     public static void clearCache() {
         ADDRESS_CACHE.clear();
     }
@@ -430,7 +440,7 @@ public final class FastDoh {
                     );
                 }
 
-                if (addresses.size() >= 6) {
+                if (addresses.size() >= 16) {
                     break;
                 }
             }

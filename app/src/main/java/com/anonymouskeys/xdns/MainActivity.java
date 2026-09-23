@@ -212,7 +212,7 @@ public class MainActivity extends Activity {
 
         TextView subtitle =
                 text(
-                        "DoH + Dragon DPI • Learned Routing • v0.6.1",
+                        "DoH + Dragon DPI • Route Rescue • v0.6.2",
                         15,
                         Color.rgb(170, 174, 185)
                 );

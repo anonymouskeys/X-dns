@@ -14,11 +14,19 @@ public final class RouteMemory {
     private static final String KEY_GOOD = "learned_routes_v1";
     private static final long GOOD_TTL = 12L * 60L * 60L * 1000L;
     private static final long BAD_TTL = 3L * 60L * 1000L;
+    private static final long DOMAIN_TTL = 30L * 60L * 1000L;
+    private static final long FAILURE_LOG_TTL = 5_000L;
 
     private static final ConcurrentHashMap<String, Good> GOOD =
             new ConcurrentHashMap<>();
 
     private static final ConcurrentHashMap<String, Long> BAD =
+            new ConcurrentHashMap<>();
+
+    private static final ConcurrentHashMap<String, Long> DOMAIN_GOOD =
+            new ConcurrentHashMap<>();
+
+    private static final ConcurrentHashMap<String, Long> FAILURE_LOG =
             new ConcurrentHashMap<>();
 
     private static volatile boolean loaded;
@@ -151,6 +159,66 @@ public final class RouteMemory {
             String host
     ) {
         markHealth(prefs, host, false);
+    }
+
+    public static boolean preferDomain(
+            String host,
+            int port
+    ) {
+        String key = routeKey(host, port);
+        Long until = DOMAIN_GOOD.get(key);
+
+        if (until == null) return false;
+
+        if (until <= System.currentTimeMillis()) {
+            DOMAIN_GOOD.remove(key);
+            return false;
+        }
+
+        return true;
+    }
+
+    public static void domainSuccess(
+            SharedPreferences prefs,
+            String host,
+            int port
+    ) {
+        DOMAIN_GOOD.put(
+                routeKey(host, port),
+                System.currentTimeMillis() + DOMAIN_TTL
+        );
+
+        markHealth(prefs, host, true);
+    }
+
+    public static void domainFailure(
+            String host,
+            int port
+    ) {
+        DOMAIN_GOOD.remove(
+                routeKey(host, port)
+        );
+    }
+
+    public static boolean shouldLogFailure(
+            String host,
+            int port
+    ) {
+        String key = routeKey(host, port);
+        long now = System.currentTimeMillis();
+
+        Long next = FAILURE_LOG.get(key);
+
+        if (next != null && next > now) {
+            return false;
+        }
+
+        FAILURE_LOG.put(
+                key,
+                now + FAILURE_LOG_TTL
+        );
+
+        return true;
     }
 
     public static String healthText(

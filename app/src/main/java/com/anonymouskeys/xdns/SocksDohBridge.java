@@ -158,6 +158,33 @@ public final class SocksDohBridge {
             Exception last = null;
             String connectedIp = null;
             int rejected = 0;
+            boolean domainRescue = false;
+
+            if (request.addressType == 0x03
+                    && request.port == 443
+                    && RouteMemory.preferDomain(
+                    request.host,
+                    request.port
+            )) {
+                try {
+                    upstream =
+                            connectCiadpiDomain(
+                                    request.host,
+                                    request.port
+                            );
+
+                    connectedIp = "domain";
+                    domainRescue = true;
+
+                } catch (Exception e) {
+                    last = e;
+
+                    RouteMemory.domainFailure(
+                            request.host,
+                            request.port
+                    );
+                }
+            }
 
             int maxTries =
                     Math.min(
@@ -165,28 +192,134 @@ public final class SocksDohBridge {
                             candidates.size()
                     );
 
-            for (int i = 0; i < maxTries; i++) {
-                String ip = candidates.get(i);
+            if (upstream == null) {
+                for (int i = 0; i < maxTries; i++) {
+                    String ip = candidates.get(i);
+
+                    try {
+                        upstream =
+                                connectCiadpi(
+                                        ip,
+                                        request.port
+                                );
+
+                        connectedIp = ip;
+                        break;
+
+                    } catch (Exception e) {
+                        last = e;
+                        rejected++;
+
+                        RouteMemory.failure(
+                                prefs,
+                                request.host,
+                                request.port,
+                                ip
+                        );
+                    }
+                }
+            }
+
+            if (upstream == null
+                    && request.addressType == 0x03) {
+
+                List<String> alternates =
+                        FastDoh.resolveAlternateCandidates(
+                                prefs,
+                                request.host,
+                                candidates
+                        );
+
+                alternates =
+                        RouteMemory.prioritize(
+                                prefs,
+                                request.host,
+                                request.port,
+                                alternates
+                        );
+
+                if (!alternates.isEmpty()) {
+                    DnsLog.addRaw(
+                            "ALT DOH RESCUE • "
+                                    + request.host
+                                    + " • "
+                                    + alternates.size()
+                                    + " new IPs"
+                    );
+                }
+
+                int altTries =
+                        Math.min(
+                                12,
+                                alternates.size()
+                        );
+
+                for (int i = 0;
+                     i < altTries
+                             && upstream == null;
+                     i++) {
+
+                    String ip =
+                            alternates.get(i);
+
+                    try {
+                        upstream =
+                                connectCiadpi(
+                                        ip,
+                                        request.port
+                                );
+
+                        connectedIp = ip;
+                        break;
+
+                    } catch (Exception e) {
+                        last = e;
+                        rejected++;
+
+                        RouteMemory.failure(
+                                prefs,
+                                request.host,
+                                request.port,
+                                ip
+                        );
+                    }
+                }
+            }
+
+            if (upstream == null
+                    && request.addressType == 0x03
+                    && request.port == 443) {
 
                 try {
                     upstream =
-                            connectCiadpi(
-                                    ip,
+                            connectCiadpiDomain(
+                                    request.host,
                                     request.port
                             );
 
-                    connectedIp = ip;
-                    break;
+                    connectedIp = "domain";
+                    domainRescue = true;
+
+                    RouteMemory.domainSuccess(
+                            prefs,
+                            request.host,
+                            request.port
+                    );
+
+                    DnsLog.addRaw(
+                            "DOMAIN RESCUE ✓ • "
+                                    + request.host
+                                    + ":"
+                                    + request.port
+                                    + " • local edge via ciadpi"
+                    );
 
                 } catch (Exception e) {
                     last = e;
-                    rejected++;
 
-                    RouteMemory.failure(
-                            prefs,
+                    RouteMemory.domainFailure(
                             request.host,
-                            request.port,
-                            ip
+                            request.port
                     );
                 }
             }
@@ -229,39 +362,62 @@ public final class SocksDohBridge {
                         request.host
                 );
 
-                DnsLog.addRaw(
-                        "ROUTE ✗ • "
-                                + request.host
-                                + ":"
-                                + request.port
-                                + " • "
-                                + rejected
-                                + " IPs rejected"
-                                + (last == null
-                                ? ""
-                                : " • " + safeMessage(last))
+                FastDoh.invalidate(
+                        request.host
                 );
+
+                if (RouteMemory.shouldLogFailure(
+                        request.host,
+                        request.port
+                )) {
+                    DnsLog.addRaw(
+                            "ROUTE ✗ • "
+                                    + request.host
+                                    + ":"
+                                    + request.port
+                                    + " • "
+                                    + rejected
+                                    + " IPs rejected"
+                                    + (last == null
+                                    ? ""
+                                    : " • " + safeMessage(last))
+                    );
+                }
 
                 throw new IOException(
                         "route unavailable"
                 );
             }
 
-            boolean changed =
-                    RouteMemory.success(
-                            prefs,
-                            request.host,
-                            request.port,
-                            connectedIp
-                    );
+            boolean changed = false;
+
+            if (domainRescue) {
+                RouteMemory.domainSuccess(
+                        prefs,
+                        request.host,
+                        request.port
+                );
+            } else {
+                changed =
+                        RouteMemory.success(
+                                prefs,
+                                request.host,
+                                request.port,
+                                connectedIp
+                        );
+            }
 
             boolean memoryHit =
-                    rememberedBefore != null
+                    !domainRescue
+                            && rememberedBefore != null
                             && rememberedBefore.equals(
                                     connectedIp
                             );
 
-            if (changed) {
+            if (domainRescue) {
+                // DOMAIN RESCUE was already logged above.
+
+            } else if (changed) {
                 DnsLog.addRaw(
                         "ROUTE LEARN ✓ • "
                                 + request.host
@@ -580,6 +736,146 @@ public final class SocksDohBridge {
 
             throw new IOException(
                     "ciadpi bad reply address"
+            );
+        }
+
+        readExact(in, 2);
+
+        return socket;
+    }
+
+    private Socket connectCiadpiDomain(
+            String host,
+            int port
+    ) throws Exception {
+
+        byte[] name =
+                host.getBytes(
+                        StandardCharsets.US_ASCII
+                );
+
+        if (name.length == 0
+                || name.length > 255) {
+            throw new IOException(
+                    "invalid SOCKS domain"
+            );
+        }
+
+        Socket socket = new Socket();
+
+        socket.connect(
+                new InetSocketAddress(
+                        "127.0.0.1",
+                        DragonByeDpi.PORT
+                ),
+                1500
+        );
+
+        socket.setTcpNoDelay(true);
+        socket.setSoTimeout(10_000);
+
+        InputStream in =
+                socket.getInputStream();
+
+        OutputStream out =
+                socket.getOutputStream();
+
+        out.write(
+                new byte[]{
+                        0x05,
+                        0x01,
+                        0x00
+                }
+        );
+        out.flush();
+
+        byte[] greeting =
+                readExact(in, 2);
+
+        if ((greeting[0] & 0xff) != 0x05
+                || (greeting[1] & 0xff) != 0x00) {
+            closeQuietly(socket);
+
+            throw new IOException(
+                    "ciadpi SOCKS greeting failed"
+            );
+        }
+
+        byte[] request =
+                new byte[
+                        4
+                                + 1
+                                + name.length
+                                + 2
+                        ];
+
+        request[0] = 0x05;
+        request[1] = 0x01;
+        request[2] = 0x00;
+        request[3] = 0x03;
+        request[4] = (byte) name.length;
+
+        System.arraycopy(
+                name,
+                0,
+                request,
+                5,
+                name.length
+        );
+
+        int portOffset =
+                5 + name.length;
+
+        request[portOffset] =
+                (byte) (
+                        (port >>> 8)
+                                & 0xff
+                );
+
+        request[portOffset + 1] =
+                (byte) (
+                        port
+                                & 0xff
+                );
+
+        out.write(request);
+        out.flush();
+
+        byte[] reply =
+                readExact(in, 4);
+
+        if ((reply[0] & 0xff) != 0x05
+                || (reply[1] & 0xff) != 0x00) {
+
+            int code =
+                    reply[1] & 0xff;
+
+            closeQuietly(socket);
+
+            throw new IOException(
+                    "ciadpi DOMAIN CONNECT failed • code "
+                            + code
+            );
+        }
+
+        int replyType =
+                reply[3] & 0xff;
+
+        if (replyType == 0x01) {
+            readExact(in, 4);
+
+        } else if (replyType == 0x04) {
+            readExact(in, 16);
+
+        } else if (replyType == 0x03) {
+            int len = readU8(in);
+            readExact(in, len);
+
+        } else {
+            closeQuietly(socket);
+
+            throw new IOException(
+                    "ciadpi bad domain reply"
             );
         }
 
