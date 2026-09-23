@@ -3,6 +3,8 @@ name: Build X-dns universal APK
 on:
   push:
     branches: [ "main" ]
+  pull_request:
+    branches: [ "main" ]
   workflow_dispatch:
 
 permissions:
@@ -21,6 +23,9 @@ jobs:
         with:
           distribution: temurin
           java-version: "21"
+
+      - name: Test recovery invariants
+        run: bash tests/run-regression.sh
 
       - name: Set up Gradle
         uses: gradle/actions/setup-gradle@v4
@@ -149,11 +154,11 @@ jobs:
 
           cp \
             app/build/outputs/apk/debug/app-debug.apk \
-            dist/X-dns-universal-v0.7.1apk
+            dist/X-dns-universal-v0.7.1.apk
 
       - name: Upload universal APK
         uses: actions/upload-artifact@v4
         with:
           name: X-dns-universal-v0.7.1
-          path: dist/X-dns-universal-v0.7.1apk
+          path: dist/X-dns-universal-v0.7.1.apk
           if-no-files-found: error

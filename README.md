@@ -3,7 +3,12 @@
 Experimental Android local VPN combining DNS-over-HTTPS discovery/benchmarking
 with a local Dragon/ByeDPI traffic path.
 
-## v0.4
+## Network recovery fix (under device validation)
+
+AUTO now belongs to the foreground service and retests after operator/Wi-Fi changes.
+See [recovery behavior, checks, and limits](docs-network-recovery.md).
+
+## Original v0.4 overview
 
 ### Persistent DoH database
 

@@ -10,7 +10,7 @@ import java.util.concurrent.ConcurrentHashMap;
 
 public final class InstagramRescue {
 
-    private static final int MAX_RESOLVERS = 6;
+    private static final int MAX_RESOLVERS = 2;
     private static final long POSITIVE_TTL_MS = 120_000L;
     private static final long NEGATIVE_TTL_MS = 30_000L;
 
@@ -18,6 +18,12 @@ public final class InstagramRescue {
             new ConcurrentHashMap<>();
 
     private InstagramRescue() {}
+    private static volatile boolean ipv6Available;
+    private static final RecoveryGeneration cacheGeneration = new RecoveryGeneration();
+    public static void setIpv6Available(boolean available) {
+        ipv6Available = available;
+        if (!available) clearCache();
+    }
 
     private static final class CacheEntry {
         final List<String> addresses;
@@ -56,10 +62,11 @@ public final class InstagramRescue {
             String host,
             List<String> ipv4
     ) {
-        if (!isMetaHost(host)) {
+        if (!ipv6Available || !isMetaHost(host)) {
             return ipv4;
         }
 
+        final long ticket = cacheGeneration.current();
         String key =
                 host.toLowerCase(
                         Locale.ROOT
@@ -88,17 +95,18 @@ public final class InstagramRescue {
                             host
                     );
 
-            CACHE.put(
+            final List<String> resolved = ipv6;
+            cacheGeneration.publish(ticket, () -> CACHE.put(
                     key,
                     new CacheEntry(
-                            ipv6,
+                            resolved,
                             now + (
-                                    ipv6.isEmpty()
+                                    resolved.isEmpty()
                                             ? NEGATIVE_TTL_MS
                                             : POSITIVE_TTL_MS
                             )
                     )
-            );
+            ));
         }
 
         if (ipv6.isEmpty()) {
@@ -126,7 +134,10 @@ public final class InstagramRescue {
     }
 
     public static void clearCache() {
-        CACHE.clear();
+        synchronized (cacheGeneration) {
+            cacheGeneration.invalidate();
+            CACHE.clear();
+        }
     }
 
     private static List<String> resolveIpv6(
@@ -173,7 +184,7 @@ public final class InstagramRescue {
                         )
                 );
 
-                if (out.size() >= 6) {
+                if (!out.isEmpty()) {
                     break;
                 }
 

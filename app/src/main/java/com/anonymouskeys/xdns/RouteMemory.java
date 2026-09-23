@@ -248,7 +248,7 @@ public final class RouteMemory {
         load(prefs);
 
         return "Learned routes: " + GOOD.size()
-                + "\nYouTube " + state(prefs, "youtube")
+                + "\nTCP routes only — YouTube " + state(prefs, "youtube")
                 + "   Instagram " + state(prefs, "instagram")
                 + "   TikTok " + state(prefs, "tiktok");
     }

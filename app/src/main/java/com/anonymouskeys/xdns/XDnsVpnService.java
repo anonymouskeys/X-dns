@@ -8,6 +8,15 @@ import android.content.Intent;
 import android.content.SharedPreferences;
 import android.content.pm.ServiceInfo;
 import android.net.VpnService;
+import android.net.ConnectivityManager;
+import android.net.Network;
+import android.net.NetworkCapabilities;
+import android.net.LinkProperties;
+import android.os.Handler;
+import android.os.Looper;
+import java.util.concurrent.Future;
+import java.util.concurrent.CancellationException;
+
 import android.os.Build;
 import android.os.ParcelFileDescriptor;
 
@@ -34,6 +43,24 @@ public class XDnsVpnService extends VpnService {
 
     public static final String MODE_DOH = "doh";
     public static final String MODE_DRAGON_DPI = "dragon_dpi";
+
+    public static final String ACTION_AUTO = "com.anonymouskeys.xdns.AUTO";
+    private static volatile boolean active;
+    private static volatile boolean tuning;
+    public static boolean isActive() { return active; }
+    public static boolean isTuning() { return tuning; }
+
+    private final Handler networkHandler = new Handler(Looper.getMainLooper());
+    private static final ExecutorService lifecycle = Executors.newSingleThreadExecutor();
+    private final RecoveryGeneration generation = new RecoveryGeneration();
+    private Future<?> operation;
+    private ConnectivityManager connectivity;
+    private ConnectivityManager.NetworkCallback networkCallback;
+    private volatile Network underlying;
+    private volatile boolean wantsAuto;
+    private boolean seenNetwork;
+    private volatile boolean destroyed;
+    private final Runnable recover = this::recoverNetwork;
 
     public static final String ACTION_START =
             "com.anonymouskeys.xdns.START";
@@ -102,47 +129,119 @@ public class XDnsVpnService extends VpnService {
             return START_NOT_STICKY;
         }
 
-        if (vpnInterface != null) {
-            return START_STICKY;
+        startForegroundCompat(createNotification());
+        active = true;
+        if (ACTION_AUTO.equals(action)) {
+            wantsAuto = true;
+            getSharedPreferences(PREFS, MODE_PRIVATE).edit()
+                    .putString(KEY_MODE, MODE_DRAGON_DPI).apply();
         }
-
-        try {
-            startForegroundCompat(
-                    createNotification()
-            );
-
-            SharedPreferences prefs =
-                    getSharedPreferences(
-                            PREFS,
-                            MODE_PRIVATE
-                    );
-
-            String mode = prefs.getString(
-                    KEY_MODE,
-                    MODE_DOH
-            );
-
-            if (MODE_DRAGON_DPI.equals(mode)) {
-                startDragonDpi(prefs);
-            } else {
-                startDnsOnly(prefs);
+        if (networkCallback == null) {
+            if (MODE_DRAGON_DPI.equals(getSharedPreferences(PREFS, MODE_PRIVATE).getString(KEY_MODE, MODE_DOH))) {
+                wantsAuto = true;
             }
-
-            return START_STICKY;
-
-        } catch (Throwable e) {
-            DnsLog.addRaw(
-                    "VPN ERROR • " + safeMessage(e)
-            );
-
-            running = false;
-            runningStrategy = "";
-
-            stopForegroundCompat();
-            stopSelf();
-
-            return START_NOT_STICKY;
+            connectivity = getSystemService(ConnectivityManager.class);
+            networkCallback = new ConnectivityManager.NetworkCallback() {
+                @Override public void onCapabilitiesChanged(Network network, NetworkCapabilities caps) {
+                    // X-dns is excluded from its own VPN: this is the app's default network.
+                    if (!caps.hasCapability(NetworkCapabilities.NET_CAPABILITY_NOT_VPN)) return;
+                    if (!caps.hasCapability(NetworkCapabilities.NET_CAPABILITY_INTERNET)) return;
+                    if (!network.equals(underlying)) {
+                        underlying = network;
+                        if (seenNetwork) wantsAuto = true;
+                        seenNetwork = true;
+                        scheduleRecovery();
+                    }
+                }
+                @Override public void onLinkPropertiesChanged(Network network, LinkProperties properties) {
+                    if (network.equals(underlying)) {
+                        boolean ipv6 = properties.getRoutes().stream().anyMatch(r -> r.isDefaultRoute()
+                                && r.getDestination().getAddress() instanceof java.net.Inet6Address);
+                        InstagramRescue.setIpv6Available(ipv6);
+                    }
+                }
+                @Override public void onLost(Network network) {
+                    if (network.equals(underlying)) {
+                        underlying = null;
+                        InstagramRescue.setIpv6Available(false);
+                        wantsAuto = true;
+                        scheduleRecovery();
+                    }
+                }
+            };
+            connectivity.registerDefaultNetworkCallback(networkCallback, networkHandler);
         }
+        if (ACTION_AUTO.equals(action) || !running) scheduleRecovery();
+        return START_STICKY;
+    }
+
+    private void stage(String text) {
+        getSharedPreferences(PREFS, MODE_PRIVATE).edit().putString(KEY_LAST_START_STAGE, text).apply();
+        DnsLog.addRaw(text);
+    }
+
+    // Called on the main looper. Invalidate immediately, debounce only the replacement.
+    private void scheduleRecovery() {
+        if (!active || destroyed) return;
+        generation.invalidate();
+        if (operation != null) operation.cancel(true);
+        DohClient.networkChanged();
+        networkHandler.removeCallbacks(recover);
+        stage(underlying == null ? "NETWORK • waiting for Internet" : "NETWORK • connection changed; retesting");
+        networkHandler.postDelayed(recover, 1500);
+    }
+
+    private void recoverNetwork() {
+        if (!active || destroyed) return;
+        final long ticket = generation.current();
+        final Network network = underlying;
+        operation = lifecycle.submit(() -> {
+            try {
+                stopEngines();
+                if (!current(ticket)) return;
+                SharedPreferences prefs = getSharedPreferences(PREFS, MODE_PRIVATE);
+                FastDoh.clearCache();
+                InstagramRescue.clearCache();
+                RouteMemory.resetForFreshAuto(prefs);
+                ResolverStore.resetMeasurements(prefs);
+                if (network == null) { stage("NETWORK • waiting for Internet"); return; }
+                setUnderlyingNetworks(new Network[]{network});
+                boolean dragon = MODE_DRAGON_DPI.equals(prefs.getString(KEY_MODE, MODE_DOH));
+                if (dragon && wantsAuto) {
+                    tuning = true;
+                    int ttl;
+                    try { ttl = Integer.parseInt(prefs.getString(KEY_DPI_TTL, "8")); }
+                    catch (Exception e) { ttl = 8; }
+                    AutoTuner.Result result = AutoTuner.run(this, prefs, ttl,
+                            text -> { if (current(ticket)) stage(text); }, () -> current(ticket),
+                            change -> generation.publish(ticket, change));
+                    if (!current(ticket)) return;
+                    if (!result.ok) {
+                        stage(result.summary() + " • retry AUTO or change network");
+                        return;
+                    }
+                    wantsAuto = false;
+                }
+                if (!current(ticket)) return;
+                dohPool = Executors.newFixedThreadPool(4);
+                byeDpi = new DragonByeDpi();
+                dohBridge = new SocksDohBridge();
+                hevTunnel = new HevTunnel();
+                if (dragon) startDragonDpi(prefs); else startDnsOnly(prefs);
+                if (!current(ticket)) stopEngines();
+                else if (dragon) stage("RUNNING • " + prefs.getString(KEY_AUTO_PROFILE, runningStrategy));
+            } catch (CancellationException e) {
+                stopEngines();
+            } catch (Throwable e) {
+                stopEngines();
+                if (current(ticket)) stage("VPN ERROR • " + safeMessage(e));
+            } finally { tuning = false; }
+        });
+    }
+
+    private boolean current(long ticket) {
+        return active && !destroyed && generation.current() == ticket
+                && !Thread.currentThread().isInterrupted();
     }
 
     private void startDnsOnly(
@@ -245,7 +344,7 @@ public class XDnsVpnService extends VpnService {
                 this,
                 ttl,
                 strategyId,
-                true
+                forceTcp
         );
 
         // HEV sends SOCKS domain requests here. The bridge resolves those
@@ -414,9 +513,8 @@ public class XDnsVpnService extends VpnService {
 
                 if (pool != null
                         && !pool.isShutdown()) {
-                    pool.submit(
-                            () -> handleDns(request)
-                    );
+                    final long dnsGeneration = generation.current();
+                    pool.submit(() -> handleDns(request, dnsGeneration));
                 }
             }
 
@@ -434,8 +532,9 @@ public class XDnsVpnService extends VpnService {
     }
 
     private void handleDns(
-            DnsPacket.Request request
+            DnsPacket.Request request, long ticket
     ) {
+        if (!current(ticket)) return;
         String name =
                 DnsPacket.queryName(request.dns);
 
@@ -463,6 +562,7 @@ public class XDnsVpnService extends VpnService {
         DohClient.Result result =
                 raced.result;
 
+        if (!current(ticket)) return;
         try {
             if (result.ok()) {
                 String address =
@@ -550,6 +650,32 @@ public class XDnsVpnService extends VpnService {
     }
 
     private void stopNow() {
+        active = false;
+        long ticket = generation.invalidate();
+        networkHandler.removeCallbacks(recover);
+        if (operation != null) operation.cancel(true);
+        DohClient.networkChanged();
+        unregisterNetwork();
+        lifecycle.submit(() -> {
+            stopEngines();
+            if (generation.current() == ticket && !active) {
+                stopForegroundCompat();
+                stopSelf();
+            }
+        });
+    }
+
+    private void unregisterNetwork() {
+        if (networkCallback != null) {
+            try { connectivity.unregisterNetworkCallback(networkCallback); }
+            catch (Exception ignored) { }
+            networkCallback = null;
+        }
+        underlying = null;
+        seenNetwork = false;
+    }
+
+    private void stopEngines() {
         running = false;
 
         if (tunThread != null) {
@@ -586,10 +712,7 @@ public class XDnsVpnService extends VpnService {
 
         runningStrategy = "";
 
-        stopForegroundCompat();
-        stopSelf();
-
-        DnsLog.addRaw("STOP completed");
+        DnsLog.addRaw("ENGINES stopped");
     }
 
     private void closeVpn() {
@@ -617,11 +740,14 @@ public class XDnsVpnService extends VpnService {
 
     @Override
     public void onDestroy() {
-        if (running
-                || vpnInterface != null) {
-            stopNow();
-        }
-
+        destroyed = true;
+        active = false;
+        generation.invalidate();
+        networkHandler.removeCallbacks(recover);
+        unregisterNetwork();
+        if (operation != null) operation.cancel(true);
+        DohClient.networkChanged();
+        lifecycle.submit(this::stopEngines);
         super.onDestroy();
     }
 

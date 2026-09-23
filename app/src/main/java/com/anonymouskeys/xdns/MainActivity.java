@@ -359,7 +359,7 @@ public class MainActivity extends Activity {
         );
 
         toggle.setOnClickListener(v -> {
-            if (XDnsVpnService.isRunning()) {
+            if (XDnsVpnService.isActive()) {
                 Intent stop =
                         new Intent(
                                 this,
@@ -1054,77 +1054,16 @@ public class MainActivity extends Activity {
         );
     }
 
+    private boolean pendingAuto;
+
     private void runAutoTune() {
-        if (autoTuning) {
-            Toast.makeText(
-                    this,
-                    "AUTO is already running",
-                    Toast.LENGTH_SHORT
-            ).show();
+        if (XDnsVpnService.isTuning()) {
+            Toast.makeText(this, "AUTO is already running", Toast.LENGTH_SHORT).show();
             return;
         }
-
-        autoTuning = true;
-        autoButton.setEnabled(false);
-
-        int ttl = readTtl();
-
-        autoResult.setText(
-                "AUTO • fresh network test starting…"
-        );
-
-        new Thread(() -> {
-            AutoTuner.Result result =
-                    AutoTuner.run(
-                            this,
-                            prefs,
-                            ttl,
-                            text -> runOnUiThread(
-                                    () -> autoResult
-                                            .setText(text)
-                            )
-                    );
-
-            runOnUiThread(() -> {
-                autoTuning = false;
-                autoButton.setEnabled(true);
-
-                if (result.ok) {
-                    autoResult.setText(
-                            "✓ AUTO PROFILE\n"
-                                    + result.summary()
-                    );
-
-                    autoResult.setTextColor(
-                            Color.rgb(88, 214, 141)
-                    );
-
-                    loadDohOptions();
-                    loadStrategies();
-                    loadMode();
-
-                    Toast.makeText(
-                            this,
-                            "AUTO profile found. Starting Dragon DPI…",
-                            Toast.LENGTH_LONG
-                    ).show();
-
-                    handler.postDelayed(
-                            this::requestVpn,
-                            350
-                    );
-
-                } else {
-                    autoResult.setText(
-                            "✗ " + result.summary()
-                    );
-
-                    autoResult.setTextColor(
-                            Color.rgb(255, 120, 120)
-                    );
-                }
-            });
-        }, "xdns-auto-tuner").start();
+        pendingAuto = true;
+        autoResult.setText("AUTO • waiting for network test…");
+        requestVpn();
     }
 
     private void addCustomDoh() {
@@ -1843,8 +1782,9 @@ public class MainActivity extends Activity {
                 );
 
         service.setAction(
-                XDnsVpnService.ACTION_START
+                pendingAuto ? XDnsVpnService.ACTION_AUTO : XDnsVpnService.ACTION_START
         );
+        pendingAuto = false;
 
         if (Build.VERSION.SDK_INT
                 >= Build.VERSION_CODES.O) {
@@ -2162,7 +2102,15 @@ public class MainActivity extends Activity {
                         + selected
         );
 
-        if (!autoTuning) {
+        autoTuning = XDnsVpnService.isTuning();
+        autoButton.setEnabled(!autoTuning);
+        if (XDnsVpnService.isActive() && !running) {
+            status.setText(autoTuning ? "AUTO TESTING" : "WAITING / RECOVERING");
+            toggle.setText("STOP");
+        }
+        if (XDnsVpnService.isActive()) {
+            autoResult.setText(prefs.getString(XDnsVpnService.KEY_LAST_START_STAGE, ""));
+        } else if (!autoTuning) {
             String profile =
                     prefs.getString(
                             XDnsVpnService.KEY_AUTO_PROFILE,

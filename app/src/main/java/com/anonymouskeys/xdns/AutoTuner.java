@@ -1,13 +1,15 @@
 package com.anonymouskeys.xdns;
 
 import android.content.Context;
-import android.content.Intent;
 import android.content.SharedPreferences;
 
 import java.util.ArrayList;
 import java.util.Collections;
 import java.util.Comparator;
 import java.util.List;
+import java.util.function.BooleanSupplier;
+import java.util.concurrent.CancellationException;
+import java.util.concurrent.*;
 
 public final class AutoTuner {
 
@@ -64,6 +66,8 @@ public final class AutoTuner {
         final ResolverStore.Entry resolver;
         final DpiStrategies.Preset strategy;
         final YoutubeProbe.Result probe;
+        String services = "";
+        int servicesOk;
 
         PairCandidate(
                 ResolverStore.Entry resolver,
@@ -84,41 +88,22 @@ public final class AutoTuner {
             Context context,
             SharedPreferences prefs,
             int fakeTtl,
-            Listener listener
+            Listener listener,
+            BooleanSupplier current,
+            java.util.function.Predicate<Runnable> publish
     ) {
-        if (XDnsVpnService.isRunning()) {
-            Intent stop =
-                    new Intent(
-                            context,
-                            XDnsVpnService.class
-                    );
+        // The foreground service exclusively owns engine start/stop and cancellation.
+        final long deadline = System.nanoTime() + TimeUnit.MINUTES.toNanos(4);
+        Listener checkedListener = text -> {
+            if (!current.getAsBoolean()) throw new CancellationException();
+            if (listener != null) listener.onProgress(text);
+        };
+        return runChecked(context, prefs, fakeTtl, checkedListener, current, publish, deadline);
+    }
 
-            stop.setAction(
-                    XDnsVpnService.ACTION_STOP
-            );
-
-            context.startService(stop);
-
-            long deadline =
-                    System.currentTimeMillis()
-                            + 3000;
-
-            while (XDnsVpnService.isRunning()
-                    && System.currentTimeMillis()
-                    < deadline) {
-                try {
-                    Thread.sleep(100);
-                } catch (InterruptedException e) {
-                    Thread.currentThread().interrupt();
-                    return fail("AUTO interrupted while stopping VPN");
-                }
-            }
-
-            if (XDnsVpnService.isRunning()) {
-                return fail("Could not stop current X-dns VPN");
-            }
-        }
-
+    private static Result runChecked(Context context, SharedPreferences prefs, int fakeTtl,
+                                     Listener listener, BooleanSupplier current,
+                                     java.util.function.Predicate<Runnable> publish, long deadline) {
         DnsLog.beginSession("AUTO tuner");
 
         progress(
@@ -133,7 +118,7 @@ public final class AutoTuner {
 
         progress(listener, "AUTO • loading resolver database");
 
-        ensureCatalogSaved(prefs, listener);
+        // Use saved/built-in endpoints first; catalog refresh must not block recovery.
         ensureSomeResolversWork(prefs, listener);
 
         List<ResolverStore.Entry> working =
@@ -144,7 +129,7 @@ public final class AutoTuner {
         }
 
         // Re-benchmark the current best five with 3 real DNS queries.
-        int benchmarkCount = Math.min(12, working.size());
+        int benchmarkCount = Math.min(5, working.size());
 
         for (int i = 0; i < benchmarkCount; i++) {
             ResolverStore.Entry entry = working.get(i);
@@ -156,7 +141,8 @@ public final class AutoTuner {
                             + " • " + entry.name
             );
 
-            benchmarkResolver(prefs, entry);
+            benchmarkResolver(prefs, entry, listener);
+            if (System.nanoTime() > deadline) return fail("AUTO budget exhausted during DoH checks");
         }
 
         working = ResolverStore.working(prefs);
@@ -172,6 +158,7 @@ public final class AutoTuner {
 
         List<PairCandidate> winners = new ArrayList<>();
 
+        search:
         for (int r = 0; r < resolverCount; r++) {
             ResolverStore.Entry resolver = working.get(r);
 
@@ -184,6 +171,7 @@ public final class AutoTuner {
             );
 
             for (int s = 0; s < strategies.size(); s++) {
+                if (System.nanoTime() > deadline) break search;
                 DpiStrategies.Preset strategy =
                         strategies.get(s);
 
@@ -196,28 +184,35 @@ public final class AutoTuner {
                 );
 
                 DragonByeDpi dpi = new DragonByeDpi();
+                SocksDohBridge bridge = new SocksDohBridge();
 
                 try {
                     dpi.start(
                             context,
                             fakeTtl,
                             strategy.id,
-                            true
+                            prefs.getBoolean(XDnsVpnService.KEY_FORCE_TCP, true)
                     );
 
-                    YoutubeProbe.Result probe =
-                            YoutubeProbe.throughByeDpi(
-                                    resolver.url
-                            );
+                    RouteMemory.resetForFreshAuto(prefs);
+                    bridge.start(prefs, resolver.url);
+                    YoutubeProbe.Result probe = YoutubeProbe.throughBridge(
+                            new String[]{"www.youtube.com", "youtubei.googleapis.com",
+                                    "i.ytimg.com", "redirector.googlevideo.com"});
 
                     if (probe.ok) {
-                        winners.add(
-                                new PairCandidate(
-                                        resolver,
-                                        strategy,
-                                        probe
-                                )
-                        );
+                        PairCandidate candidate = new PairCandidate(resolver, strategy, probe);
+                        progress(listener, "AUTO • checking Instagram and TikTok via bridge");
+                        YoutubeProbe.Result instagram = YoutubeProbe.throughBridge(
+                                new String[]{"www.instagram.com", "i.instagram.com"});
+                        progress(listener, "AUTO • checking TikTok via bridge");
+                        YoutubeProbe.Result tiktok = YoutubeProbe.throughBridge(
+                                new String[]{"www.tiktok.com"});
+                        candidate.servicesOk = (instagram.ok ? 1 : 0) + (tiktok.ok ? 1 : 0);
+                        candidate.services = "Instagram: " + (instagram.ok ? "HTTPS reachable" : instagram.error)
+                                + " • TikTok: " + (tiktok.ok ? "HTTPS reachable" : tiktok.error);
+                        winners.add(candidate);
+                        progress(listener, "AUTO • " + candidate.services);
 
                         progress(
                                 listener,
@@ -232,6 +227,7 @@ public final class AutoTuner {
                                         + " ms"
                         );
 
+                        if (candidate.servicesOk == 2) break search;
                         // Keep the first working strategy for this resolver.
                         // Candidate order intentionally goes from simple to strong.
                         break;
@@ -247,6 +243,8 @@ public final class AutoTuner {
                         );
                     }
 
+                } catch (CancellationException e) {
+                    throw e;
                 } catch (Exception e) {
                     progress(
                             listener,
@@ -256,6 +254,7 @@ public final class AutoTuner {
                                     + safeMessage(e)
                     );
                 } finally {
+                    bridge.stop();
                     dpi.stop();
                 }
             }
@@ -266,12 +265,14 @@ public final class AutoTuner {
         }
 
         winners.sort(
-                Comparator.comparingLong(PairCandidate::score)
+                Comparator.comparingInt((PairCandidate p) -> -p.servicesOk).thenComparingLong(PairCandidate::score)
         );
 
         PairCandidate best = winners.get(0);
 
-        prefs.edit()
+        progress(listener, "AUTO • saving verified profile");
+        if (!current.getAsBoolean()) throw new CancellationException();
+        if (!publish.test(() -> prefs.edit()
                 .putString(
                         XDnsVpnService.KEY_DOH_URL,
                         best.resolver.url
@@ -291,9 +292,9 @@ public final class AutoTuner {
                                 + best.strategy.name
                                 + " • "
                                 + best.probe.latencyMs
-                                + " ms"
+                                + " ms • " + best.services
                 )
-                .apply();
+                .apply())) throw new CancellationException();
 
         return new Result(
                 true,
@@ -348,55 +349,50 @@ public final class AutoTuner {
             SharedPreferences prefs,
             Listener listener
     ) {
-        List<ResolverStore.Entry> working =
-                ResolverStore.working(prefs);
-
-        if (working.size() >= 3) return;
-
-        List<ResolverStore.Entry> all =
-                ResolverStore.all(prefs);
-
-        // Test built-ins and up to 60 saved catalog entries here.
-        // The dedicated FIND + TEST button still tests the full saved catalog.
-        int tested = 0;
-
-        for (ResolverStore.Entry entry : all) {
-            if (ResolverStore.OK.equals(entry.status)) {
-                continue;
+        List<ResolverStore.Entry> all = ResolverStore.all(prefs);
+        ExecutorService pool = Executors.newFixedThreadPool(6);
+        CompletionService<ResolverStore.Entry> completed = new ExecutorCompletionService<>(pool);
+        List<Future<ResolverStore.Entry>> futures = new ArrayList<>();
+        try {
+            // Workers never write preferences: cancelled old-network probes cannot pollute them.
+            java.util.Map<String, DohClient.Result> results = new ConcurrentHashMap<>();
+            int count = Math.min(24, all.size());
+            for (int i = 0; i < count; i++) {
+                ResolverStore.Entry entry = all.get(i);
+                futures.add(completed.submit(() -> {
+                    results.put(entry.url, DohClient.query(entry.url, DohClient.makeTestQuery("example.com")));
+                    return entry;
+                }));
             }
-
-            progress(
-                    listener,
-                    "AUTO • checking DoH • " + entry.name
-            );
-
-            DohClient.Result result =
-                    DohClient.query(
-                            entry.url,
-                            DohClient.makeTestQuery("example.com")
-                    );
-
-            ResolverStore.saveResult(
-                    prefs,
-                    entry.url,
-                    entry.name,
-                    result
-            );
-
-            tested++;
-
-            if (result.ok()) {
-                working = ResolverStore.working(prefs);
-                if (working.size() >= 5) return;
+            long deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(75);
+            int success = 0;
+            for (int i = 0; i < count; i++) {
+                progress(listener, "AUTO • testing current-network DoH endpoints • " + success + " working");
+                long remaining = deadline - System.nanoTime();
+                if (remaining <= 0) break;
+                Future<ResolverStore.Entry> done = completed.poll(remaining, TimeUnit.NANOSECONDS);
+                if (done == null) break;
+                ResolverStore.Entry entry = done.get();
+                progress(listener, "AUTO • DoH result • " + entry.name);
+                DohClient.Result result = results.get(entry.url);
+                ResolverStore.saveResult(prefs, entry.url, entry.name, result);
+                if (result.ok() && ++success >= 5) break;
             }
-
-            if (tested >= 60) return;
+        } catch (InterruptedException e) {
+            Thread.currentThread().interrupt();
+            throw new CancellationException();
+        } catch (ExecutionException e) {
+            throw new IllegalStateException("Resolver test failed", e);
+        } finally {
+            for (Future<?> f : futures) f.cancel(true);
+            pool.shutdownNow();
         }
     }
 
     private static void benchmarkResolver(
             SharedPreferences prefs,
-            ResolverStore.Entry entry
+            ResolverStore.Entry entry,
+            Listener listener
     ) {
         List<Long> latencies = new ArrayList<>();
         int success = 0;
@@ -404,6 +400,7 @@ public final class AutoTuner {
         String error = "";
 
         for (int i = 0; i < 3; i++) {
+            progress(listener, "AUTO • stability check " + entry.name + " • " + (i + 1) + "/3");
             DohClient.Result result =
                     DohClient.query(
                             entry.url,
@@ -431,6 +428,7 @@ public final class AutoTuner {
                     latencies.get(latencies.size() / 2);
         }
 
+        progress(listener, "AUTO • stability result " + entry.name);
         ResolverStore.saveBenchmark(
                 prefs,
                 entry.url,
@@ -447,6 +445,7 @@ public final class AutoTuner {
             Listener listener,
             String text
     ) {
+        if (Thread.currentThread().isInterrupted()) throw new CancellationException();
         if (listener != null) {
             listener.onProgress(text);
         }

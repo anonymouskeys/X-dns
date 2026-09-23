@@ -24,6 +24,8 @@ public final class SocksDohBridge {
     private final ExecutorService clients =
             Executors.newCachedThreadPool();
 
+    private final java.util.Set<Socket> sockets = java.util.concurrent.ConcurrentHashMap.newKeySet();
+    private String resolverOverride;
     private volatile boolean running;
     private ServerSocket server;
     private Thread acceptThread;
@@ -33,8 +35,12 @@ public final class SocksDohBridge {
             SharedPreferences prefs
     ) throws Exception {
 
-        if (running) return;
+        start(prefs, null);
+    }
 
+    public synchronized void start(SharedPreferences prefs, String resolverOverride) throws Exception {
+        if (running) return;
+        this.resolverOverride = resolverOverride;
         this.prefs = prefs;
 
         server = new ServerSocket();
@@ -85,6 +91,10 @@ public final class SocksDohBridge {
             acceptThread = null;
         }
 
+        synchronized (sockets) {
+            for (Socket socket : sockets) closeQuietly(socket);
+            sockets.clear();
+        }
         clients.shutdownNow();
         FastDoh.clearCache();
         InstagramRescue.clearCache();
@@ -93,7 +103,7 @@ public final class SocksDohBridge {
     private void acceptLoop() {
         while (running) {
             try {
-                Socket client = server.accept();
+                Socket client = track(server.accept());
 
                 client.setTcpNoDelay(true);
 
@@ -130,10 +140,7 @@ public final class SocksDohBridge {
 
             if (request.addressType == 0x03) {
                 candidates =
-                        FastDoh.resolveCandidates(
-                                prefs,
-                                request.host
-                        );
+                        resolve(request.host);
             } else {
                 candidates =
                         Collections.singletonList(
@@ -141,6 +148,7 @@ public final class SocksDohBridge {
                         );
             }
 
+            ensureRunning();
             String rememberedBefore =
                     RouteMemory.preferred(
                             prefs,
@@ -222,6 +230,7 @@ public final class SocksDohBridge {
                         break;
 
                     } catch (Exception e) {
+                        ensureRunning();
                         last = e;
                         rejected++;
 
@@ -238,6 +247,7 @@ public final class SocksDohBridge {
             if (upstream == null
                     && request.addressType == 0x03) {
 
+                ensureRunning();
                 List<String> alternates =
                         FastDoh.resolveAlternateCandidates(
                                 prefs,
@@ -288,6 +298,7 @@ public final class SocksDohBridge {
                         break;
 
                     } catch (Exception e) {
+                        ensureRunning();
                         last = e;
                         rejected++;
 
@@ -404,6 +415,7 @@ public final class SocksDohBridge {
                 );
             }
 
+            ensureRunning();
             boolean changed = false;
 
             if (domainRescue) {
@@ -517,9 +529,30 @@ public final class SocksDohBridge {
             }
 
         } finally {
+            sockets.remove(client);
+            if (upstream != null) sockets.remove(upstream);
             closeQuietly(client);
             closeQuietly(upstream);
         }
+    }
+
+    private void ensureRunning() throws IOException {
+        if (!running || Thread.currentThread().isInterrupted()) throw new IOException("Bridge stopped");
+    }
+
+    private Socket track(Socket socket) throws IOException {
+        synchronized (sockets) {
+            if (!running) { socket.close(); throw new IOException("Bridge stopped"); }
+            sockets.add(socket);
+        }
+        return socket;
+    }
+
+    private List<String> resolve(String host) throws Exception {
+        if (resolverOverride == null) return FastDoh.resolveCandidates(prefs, host);
+        DohClient.Result result = DohClient.query(resolverOverride, DohClient.makeTestQuery(host));
+        if (!result.ok()) throw new IOException("Candidate DoH failed");
+        return DnsPacket.allIpv4Addresses(result.body);
     }
 
     private Request readClientRequest(
@@ -633,7 +666,8 @@ public final class SocksDohBridge {
             int port
     ) throws Exception {
 
-        Socket socket = new Socket();
+        Socket socket = track(new Socket());
+        try {
 
         socket.connect(
                 new InetSocketAddress(
@@ -757,6 +791,11 @@ public final class SocksDohBridge {
         readExact(in, 2);
 
         return socket;
+        } catch (Exception e) {
+            sockets.remove(socket);
+            closeQuietly(socket);
+            throw e;
+        }
     }
 
     private Socket connectCiadpiDomain(
@@ -776,7 +815,8 @@ public final class SocksDohBridge {
             );
         }
 
-        Socket socket = new Socket();
+        Socket socket = track(new Socket());
+        try {
 
         socket.connect(
                 new InetSocketAddress(
@@ -897,6 +937,11 @@ public final class SocksDohBridge {
         readExact(in, 2);
 
         return socket;
+        } catch (Exception e) {
+            sockets.remove(socket);
+            closeQuietly(socket);
+            throw e;
+        }
     }
 
     private Socket connectDirect(
@@ -904,7 +949,8 @@ public final class SocksDohBridge {
             int port
     ) throws Exception {
 
-        Socket socket = new Socket();
+        Socket socket = track(new Socket());
+        try {
 
         socket.connect(
                 new InetSocketAddress(
@@ -916,6 +962,11 @@ public final class SocksDohBridge {
 
         socket.setTcpNoDelay(true);
         return socket;
+        } catch (Exception e) {
+            sockets.remove(socket);
+            closeQuietly(socket);
+            throw e;
+        }
     }
 
     private static void sendReply(

@@ -30,6 +30,7 @@ public final class FastDoh {
             new ConcurrentHashMap<>();
 
     private FastDoh() {}
+    private static final RecoveryGeneration cacheGeneration = new RecoveryGeneration();
 
     public static final class RaceResult {
         public final DohClient.Result result;
@@ -179,6 +180,7 @@ public final class FastDoh {
             String host
     ) throws Exception {
 
+        final long ticket = cacheGeneration.current();
         String key =
                 host.toLowerCase(Locale.ROOT);
 
@@ -219,7 +221,7 @@ public final class FastDoh {
             if (!primaryAddresses.isEmpty()) {
                 remember(
                         key,
-                        primaryAddresses
+                        primaryAddresses, ticket
                 );
 
                 DnsLog.addRaw(
@@ -261,7 +263,7 @@ public final class FastDoh {
 
         remember(
                 key,
-                fallback
+                fallback, ticket
         );
 
         return fallback;
@@ -341,7 +343,10 @@ public final class FastDoh {
     }
 
     public static void clearCache() {
-        ADDRESS_CACHE.clear();
+        synchronized (cacheGeneration) {
+            cacheGeneration.invalidate();
+            ADDRESS_CACHE.clear();
+        }
     }
 
     private static List<String> resolveFallback(
@@ -455,16 +460,16 @@ public final class FastDoh {
 
     private static void remember(
             String key,
-            List<String> addresses
+            List<String> addresses, long ticket
     ) {
-        ADDRESS_CACHE.put(
+        cacheGeneration.publish(ticket, () -> ADDRESS_CACHE.put(
                 key,
                 new CacheEntry(
                         addresses,
                         System.currentTimeMillis()
                                 + CACHE_TTL_MS
                 )
-        );
+        ));
     }
 
     private static void cancelRace(

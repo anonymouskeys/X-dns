@@ -53,17 +53,24 @@ public final class YoutubeProbe {
     public static Result throughByeDpi(
             String dohUrl
     ) {
-        long started =
-                System.currentTimeMillis();
+        return probeHosts(dohUrl, REQUIRED_HOSTS, DragonByeDpi.PORT);
+    }
 
+    public static Result throughBridge(String[] hosts) {
+        return probeHosts(null, hosts, SocksDohBridge.PORT);
+    }
+
+    private static Result probeHosts(String dohUrl, String[] hosts, int socksPort) {
+        long started = System.currentTimeMillis();
         int okCount = 0;
         int lastCode = -1;
 
-        for (String host : REQUIRED_HOSTS) {
+        for (String host : hosts) {
+            if (Thread.currentThread().isInterrupted()) throw new java.util.concurrent.CancellationException();
             HostResult hostResult =
                     probeHost(
                             dohUrl,
-                            host
+                            host, socksPort
                     );
 
             if (!hostResult.ok) {
@@ -87,7 +94,7 @@ public final class YoutubeProbe {
                     "AUTO • YT "
                             + okCount
                             + "/"
-                            + REQUIRED_HOSTS.length
+                            + hosts.length
                             + " ✓ • "
                             + host
                             + " • "
@@ -108,7 +115,7 @@ public final class YoutubeProbe {
 
     private static HostResult probeHost(
             String dohUrl,
-            String host
+            String host, int socksPort
     ) {
         long started =
                 System.currentTimeMillis();
@@ -117,15 +124,12 @@ public final class YoutubeProbe {
 
         try {
             String ip =
-                    resolveViaDoh(
-                            dohUrl,
-                            host
-                    );
+                    dohUrl == null ? host : resolveViaDoh(dohUrl, host);
 
             socks =
                     connectLocalSocksWithRetry(
                             "127.0.0.1",
-                            DragonByeDpi.PORT,
+                            socksPort,
                             1800
                     );
 
@@ -134,7 +138,7 @@ public final class YoutubeProbe {
             socks5Handshake(
                     socks,
                     ip,
-                    HTTPS_PORT
+                    HTTPS_PORT, dohUrl == null
             );
 
             SSLSocketFactory factory =
@@ -209,9 +213,7 @@ public final class YoutubeProbe {
                             statusLine
                     );
 
-            boolean ok =
-                    code >= 200
-                            && code < 500;
+            boolean ok = ProbePolicy.reachable(code);
 
             try {
                 tls.close();
@@ -341,7 +343,7 @@ public final class YoutubeProbe {
     private static void socks5Handshake(
             Socket socket,
             String ip,
-            int port
+            int port, boolean domain
     ) throws Exception {
 
         InputStream in =
@@ -371,14 +373,20 @@ public final class YoutubeProbe {
             );
         }
 
-        byte[] address =
-                InetAddress.getByName(ip)
-                        .getAddress();
-
-        int atyp =
-                address.length == 16
-                        ? 0x04
-                        : 0x01;
+        byte[] raw = domain ? ip.getBytes(StandardCharsets.US_ASCII)
+                : InetAddress.getByName(ip).getAddress();
+        if (domain && raw.length > 255) throw new IllegalArgumentException("SOCKS domain too long");
+        byte[] address;
+        int atyp;
+        if (domain) {
+            address = new byte[raw.length + 1];
+            address[0] = (byte) raw.length;
+            System.arraycopy(raw, 0, address, 1, raw.length);
+            atyp = 0x03;
+        } else {
+            address = raw;
+            atyp = address.length == 16 ? 0x04 : 0x01;
+        }
 
         byte[] request =
                 new byte[
