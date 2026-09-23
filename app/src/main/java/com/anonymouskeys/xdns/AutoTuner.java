@@ -120,7 +120,16 @@ public final class AutoTuner {
         }
 
         DnsLog.beginSession("AUTO tuner");
+
+        progress(
+                listener,
+                "AUTO • fresh test: forgetting old network measurements"
+        );
+
         FastDoh.clearCache();
+        InstagramRescue.clearCache();
+        RouteMemory.resetForFreshAuto(prefs);
+        ResolverStore.resetMeasurements(prefs);
 
         progress(listener, "AUTO • loading resolver database");
 

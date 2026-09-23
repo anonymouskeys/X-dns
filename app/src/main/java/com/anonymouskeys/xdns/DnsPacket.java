@@ -224,6 +224,77 @@ public final class DnsPacket {
         return new ArrayList<>(unique);
     }
 
+    public static List<String> allIpv6Addresses(byte[] dns) {
+        Set<String> unique = new LinkedHashSet<>();
+
+        try {
+            if (dns == null || dns.length < 12) {
+                return new ArrayList<>();
+            }
+
+            int answerCount = read16(dns, 6);
+
+            if (answerCount <= 0) {
+                return new ArrayList<>();
+            }
+
+            int offset = questionEnd(dns);
+
+            if (offset < 0) {
+                return new ArrayList<>();
+            }
+
+            for (int i = 0;
+                 i < answerCount && offset < dns.length;
+                 i++) {
+
+                offset = skipName(dns, offset);
+
+                if (offset < 0
+                        || offset + 10 > dns.length) {
+                    break;
+                }
+
+                int type = read16(dns, offset);
+                int rdLength = read16(dns, offset + 8);
+                int rdata = offset + 10;
+
+                if (rdata + rdLength > dns.length) {
+                    break;
+                }
+
+                if (type == 28
+                        && rdLength == 16) {
+
+                    InetAddress inet =
+                            InetAddress.getByAddress(
+                                    Arrays.copyOfRange(
+                                            dns,
+                                            rdata,
+                                            rdata + 16
+                                    )
+                            );
+
+                    if (!inet.isAnyLocalAddress()
+                            && !inet.isLoopbackAddress()
+                            && !inet.isLinkLocalAddress()
+                            && !inet.isMulticastAddress()) {
+
+                        unique.add(
+                                inet.getHostAddress()
+                        );
+                    }
+                }
+
+                offset = rdata + rdLength;
+            }
+
+        } catch (Exception ignored) {
+        }
+
+        return new ArrayList<>(unique);
+    }
+
     public static String firstAddress(byte[] dns) {
         try {
             if (dns == null || dns.length < 12) return "-";

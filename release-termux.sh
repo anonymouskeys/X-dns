@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-VERSION="0.7.0"
+VERSION="0.7.1"
 TAG="v${VERSION}"
 REPO="anonymouskeys/X-dns"
 
@@ -236,7 +236,7 @@ $FINGERPRINT
 INFO
 
 cat > "$NOTES" <<'NOTES'
-# X-dns v0.7.0
+# X-dns v0.7.1
 
 DoH + Dragon DPI • Route Rescue
 
@@ -246,6 +246,8 @@ Highlights:
 - Dragon DPI full-traffic mode
 - learned route memory and failed-route cooldown
 - alternate DoH route rescue
+- AUTO always retests the current network from scratch
+- Meta/Instagram IPv6 rescue via DoH AAAA candidates
 - YouTube / TikTok route health visibility
 - new X-dns winged dragon launcher icon
 - @anonymouskeys branding and Telegram link inside the app

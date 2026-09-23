@@ -173,6 +173,28 @@ public final class ResolverStore {
         return load(prefs).get(url);
     }
 
+    public static synchronized void resetMeasurements(
+            SharedPreferences prefs
+    ) {
+        Map<String, Entry> db =
+                load(prefs);
+
+        for (Entry e : db.values()) {
+            e.status = UNKNOWN;
+            e.latencyMs = 0;
+            e.method = "";
+            e.error = "";
+            e.checkedAt = 0;
+            e.attempts = 0;
+            e.successes = 0;
+        }
+
+        save(
+                prefs,
+                db
+        );
+    }
+
     public static synchronized List<Entry> all(
             SharedPreferences prefs
     ) {

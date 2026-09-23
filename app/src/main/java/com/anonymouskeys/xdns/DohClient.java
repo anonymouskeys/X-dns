@@ -195,8 +195,23 @@ public final class DohClient {
     }
 
     public static byte[] makeTestQuery(String host) {
-        ByteArrayOutputStream out = new ByteArrayOutputStream();
-        int id = new SecureRandom().nextInt(65536);
+        return makeQuery(host, 1);
+    }
+
+    public static byte[] makeAaaaQuery(String host) {
+        return makeQuery(host, 28);
+    }
+
+    private static byte[] makeQuery(
+            String host,
+            int queryType
+    ) {
+        ByteArrayOutputStream out =
+                new ByteArrayOutputStream();
+
+        int id =
+                new SecureRandom()
+                        .nextInt(65536);
 
         write16(out, id);
         write16(out, 0x0100);
@@ -205,16 +220,27 @@ public final class DohClient {
         write16(out, 0);
         write16(out, 0);
 
-        String[] labels = host.split("\\.");
+        String[] labels =
+                host.split("\\.");
+
         for (String label : labels) {
-            byte[] bytes = label.getBytes(java.nio.charset.StandardCharsets.US_ASCII);
+            byte[] bytes =
+                    label.getBytes(
+                            java.nio.charset.StandardCharsets.US_ASCII
+                    );
+
             out.write(bytes.length);
-            out.write(bytes, 0, bytes.length);
+            out.write(
+                    bytes,
+                    0,
+                    bytes.length
+            );
         }
 
         out.write(0);
+        write16(out, queryType);
         write16(out, 1);
-        write16(out, 1);
+
         return out.toByteArray();
     }
 

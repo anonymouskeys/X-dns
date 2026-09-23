@@ -221,6 +221,27 @@ public final class RouteMemory {
         return true;
     }
 
+    public static synchronized void resetForFreshAuto(
+            SharedPreferences prefs
+    ) {
+        GOOD.clear();
+        BAD.clear();
+        DOMAIN_GOOD.clear();
+        FAILURE_LOG.clear();
+
+        loaded = true;
+
+        prefs.edit()
+                .remove(KEY_GOOD)
+                .remove("health_ok_youtube")
+                .remove("health_fail_youtube")
+                .remove("health_ok_instagram")
+                .remove("health_fail_instagram")
+                .remove("health_ok_tiktok")
+                .remove("health_fail_tiktok")
+                .apply();
+    }
+
     public static String healthText(
             SharedPreferences prefs
     ) {

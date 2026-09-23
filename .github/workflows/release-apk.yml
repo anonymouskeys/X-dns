@@ -149,11 +149,11 @@ jobs:
 
           cp \
             "$APK" \
-            dist/X-dns-universal-v0.7.0-unsigned.apk
+            dist/X-dns-universal-v0.7.1-unsigned.apk
 
       - name: Upload unsigned release APK
         uses: actions/upload-artifact@v4
         with:
-          name: X-dns-universal-v0.7.0-unsigned
-          path: dist/X-dns-universal-v0.7.0-unsigned.apk
+          name: X-dns-universal-v0.7.1-unsigned
+          path: dist/X-dns-universal-v0.7.1-unsigned.apk
           if-no-files-found: error

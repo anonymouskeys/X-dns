@@ -149,11 +149,11 @@ jobs:
 
           cp \
             app/build/outputs/apk/debug/app-debug.apk \
-            dist/X-dns-universal-v0.6.2.apk
+            dist/X-dns-universal-v0.7.1apk
 
       - name: Upload universal APK
         uses: actions/upload-artifact@v4
         with:
-          name: X-dns-universal-v0.6.2
-          path: dist/X-dns-universal-v0.6.2.apk
+          name: X-dns-universal-v0.7.1
+          path: dist/X-dns-universal-v0.7.1apk
           if-no-files-found: error

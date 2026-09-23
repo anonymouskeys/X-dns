@@ -87,6 +87,7 @@ public final class SocksDohBridge {
 
         clients.shutdownNow();
         FastDoh.clearCache();
+        InstagramRescue.clearCache();
     }
 
     private void acceptLoop() {
@@ -146,6 +147,20 @@ public final class SocksDohBridge {
                             request.host,
                             request.port
                     );
+
+            if (rememberedBefore == null
+                    && request.addressType == 0x03
+                    && request.port == 443
+                    && InstagramRescue.isMetaHost(
+                    request.host
+            )) {
+                candidates =
+                        InstagramRescue.prependIpv6(
+                                prefs,
+                                request.host,
+                                candidates
+                        );
+            }
 
             candidates =
                     RouteMemory.prioritize(

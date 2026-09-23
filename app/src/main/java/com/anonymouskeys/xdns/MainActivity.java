@@ -215,7 +215,7 @@ public class MainActivity extends Activity {
 
         TextView subtitle =
                 text(
-                        "DoH + Dragon DPI • Route Rescue • v0.7.0",
+                        "DoH + Dragon DPI • Fresh AUTO + Meta Rescue • v0.7.1",
                         15,
                         Color.rgb(170, 174, 185)
                 );
@@ -387,7 +387,7 @@ public class MainActivity extends Activity {
 
         autoButton =
                 button(
-                        "AUTO: BEST DOH + DPI FOR YOUTUBE"
+                        "AUTO: FRESH BEST PROFILE"
                 );
 
         root.addView(
@@ -1064,22 +1064,13 @@ public class MainActivity extends Activity {
             return;
         }
 
-        if (XDnsVpnService.isRunning()) {
-            Toast.makeText(
-                    this,
-                    "Stop X-dns before AUTO tuning",
-                    Toast.LENGTH_LONG
-            ).show();
-            return;
-        }
-
         autoTuning = true;
         autoButton.setEnabled(false);
 
         int ttl = readTtl();
 
         autoResult.setText(
-                "AUTO • starting…"
+                "AUTO • fresh network test starting…"
         );
 
         new Thread(() -> {
