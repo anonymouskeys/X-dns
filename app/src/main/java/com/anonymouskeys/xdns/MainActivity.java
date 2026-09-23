@@ -107,6 +107,7 @@ public class MainActivity extends Activity {
     private TextView activeDoh;
     private TextView autoResult;
     private TextView stats;
+    private TextView routeHealth;
     private TextView speed;
     private TextView testResult;
     private TextView logText;
@@ -211,7 +212,7 @@ public class MainActivity extends Activity {
 
         TextView subtitle =
                 text(
-                        "AUTO DoH + Dragon DPI • v0.5.1",
+                        "DoH + Dragon DPI • Learned Routing • v0.6.1",
                         15,
                         Color.rgb(170, 174, 185)
                 );
@@ -596,6 +597,22 @@ public class MainActivity extends Activity {
         );
 
         root.addView(stats);
+
+        routeHealth =
+                text(
+                        "",
+                        15,
+                        Color.rgb(120, 220, 165)
+                );
+
+        routeHealth.setPadding(
+                0,
+                dp(8),
+                0,
+                0
+        );
+
+        root.addView(routeHealth);
 
         speed =
                 text(
@@ -2105,6 +2122,12 @@ public class MainActivity extends Activity {
                     DnsLog.statsText()
             );
         }
+
+        routeHealth.setText(
+                RouteMemory.healthText(
+                        prefs
+                )
+        );
 
         logText.setText(
                 DnsLog.getText()

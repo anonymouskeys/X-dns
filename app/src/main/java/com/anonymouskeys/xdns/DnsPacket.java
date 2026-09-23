@@ -194,16 +194,25 @@ public final class DnsPacket {
                 }
 
                 if (type == 1 && rdLength == 4) {
-                    String ip =
+                    InetAddress inet =
                             InetAddress.getByAddress(
                                     Arrays.copyOfRange(
                                             dns,
                                             rdata,
                                             rdata + 4
                                     )
-                            ).getHostAddress();
+                            );
 
-                    unique.add(ip);
+                    if (!inet.isAnyLocalAddress()
+                            && !inet.isLoopbackAddress()
+                            && !inet.isLinkLocalAddress()
+                            && !inet.isMulticastAddress()) {
+
+                        String ip =
+                                inet.getHostAddress();
+
+                        unique.add(ip);
+                    }
                 }
 
                 offset = rdata + rdLength;

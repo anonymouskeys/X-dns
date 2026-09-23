@@ -140,8 +140,24 @@ public final class SocksDohBridge {
                         );
             }
 
+            String rememberedBefore =
+                    RouteMemory.preferred(
+                            prefs,
+                            request.host,
+                            request.port
+                    );
+
+            candidates =
+                    RouteMemory.prioritize(
+                            prefs,
+                            request.host,
+                            request.port,
+                            candidates
+                    );
+
             Exception last = null;
             String connectedIp = null;
+            int rejected = 0;
 
             int maxTries =
                     Math.min(
@@ -164,16 +180,13 @@ public final class SocksDohBridge {
 
                 } catch (Exception e) {
                     last = e;
+                    rejected++;
 
-                    DnsLog.addRaw(
-                            "ROUTE RETRY • "
-                                    + request.host
-                                    + ":"
-                                    + request.port
-                                    + " • "
-                                    + ip
-                                    + " • "
-                                    + safeMessage(e)
+                    RouteMemory.failure(
+                            prefs,
+                            request.host,
+                            request.port,
+                            ip
                     );
                 }
             }
@@ -211,28 +224,85 @@ public final class SocksDohBridge {
             }
 
             if (upstream == null) {
-                throw new IOException(
-                        "all "
-                                + maxTries
-                                + " IPs failed • "
+                RouteMemory.routeFailed(
+                        prefs,
+                        request.host
+                );
+
+                DnsLog.addRaw(
+                        "ROUTE ✗ • "
                                 + request.host
                                 + ":"
                                 + request.port
                                 + " • "
+                                + rejected
+                                + " IPs rejected"
                                 + (last == null
-                                ? "unknown"
-                                : safeMessage(last))
+                                ? ""
+                                : " • " + safeMessage(last))
+                );
+
+                throw new IOException(
+                        "route unavailable"
                 );
             }
 
-            DnsLog.addRaw(
-                    "ROUTE ✓ • "
-                            + request.host
-                            + ":"
-                            + request.port
-                            + " → "
-                            + connectedIp
-            );
+            boolean changed =
+                    RouteMemory.success(
+                            prefs,
+                            request.host,
+                            request.port,
+                            connectedIp
+                    );
+
+            boolean memoryHit =
+                    rememberedBefore != null
+                            && rememberedBefore.equals(
+                                    connectedIp
+                            );
+
+            if (changed) {
+                DnsLog.addRaw(
+                        "ROUTE LEARN ✓ • "
+                                + request.host
+                                + ":"
+                                + request.port
+                                + " → "
+                                + connectedIp
+                                + (rejected > 0
+                                ? " • "
+                                + rejected
+                                + " rejected first"
+                                : "")
+                );
+
+            } else if (rejected > 0) {
+                DnsLog.addRaw(
+                        "ROUTE RECOVER ✓ • "
+                                + request.host
+                                + ":"
+                                + request.port
+                                + " → "
+                                + connectedIp
+                                + " • "
+                                + rejected
+                                + " rejected"
+                );
+
+            } else if (memoryHit
+                    && (request.host.contains("youtube")
+                    || request.host.contains("googlevideo")
+                    || request.host.contains("instagram")
+                    || request.host.contains("facebook")
+                    || request.host.contains("tiktok"))) {
+
+                DnsLog.addRaw(
+                        "ROUTE MEMORY ✓ • "
+                                + request.host
+                                + " → "
+                                + connectedIp
+                );
+            }
 
             sendReply(client, 0x00);
 
@@ -264,7 +334,8 @@ public final class SocksDohBridge {
 
             String message = safeMessage(e);
 
-            if (!message.contains("Socket closed")
+            if (!"route unavailable".equals(message)
+                    && !message.contains("Socket closed")
                     && !message.contains("Broken pipe")
                     && !message.contains("Connection reset")) {
 
