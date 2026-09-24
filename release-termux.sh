@@ -1,314 +1,155 @@
 #!/usr/bin/env bash
 set -euo pipefail
-
-VERSION="0.7.0"
-TAG="v${VERSION}"
-REPO="anonymouskeys/X-dns"
-
-ARTIFACT="X-dns-universal-v${VERSION}-unsigned"
-SIGNED_NAME="X-dns-universal-v${VERSION}.apk"
-
-SIGN_DIR="$HOME/.xdns-signing"
-KEYSTORE="$SIGN_DIR/X-dns-release.p12"
-CERT="$SIGN_DIR/X-dns-release-cert.pem"
-KEY_INFO="$SIGN_DIR/KEY-INFO.txt"
-ALIAS="xdns-release"
-
-WORK="$HOME/X-dns-release-work/$VERSION"
-
-if [[ -d "$HOME/storage/downloads" ]]; then
-  DOWNLOADS="$HOME/storage/downloads"
-else
-  DOWNLOADS="$HOME"
-fi
-
-FINAL_APK="$DOWNLOADS/$SIGNED_NAME"
-
-echo
-echo "=========================================="
-echo " X-dns $VERSION release signer"
-echo "=========================================="
-echo
-echo "The private signing key stays on this device."
-echo "GitHub gets only the signed APK and public certificate."
-echo
-
-command -v gh >/dev/null 2>&1 || pkg install gh -y
-command -v apksigner >/dev/null 2>&1 || pkg install apksigner -y
-command -v keytool >/dev/null 2>&1 || pkg install openjdk-21 -y
-
-gh auth status >/dev/null
-
-mkdir -p "$SIGN_DIR"
-chmod 700 "$SIGN_DIR"
-
-while true; do
-  printf "Signing-key password (minimum 6 characters): "
-  stty -echo
-  IFS= read -r XDNS_KS_PASS
-  stty echo
-  printf "\n"
-
-  if [[ ${#XDNS_KS_PASS} -ge 6 ]]; then
-    break
-  fi
-
-  echo "Password is too short."
+repo="anonymouskeys/X-dns"
+version="0.7.1"
+tag="v$version"
+branch="release/v$version"
+verified="f43a0a5c2be51f48d0ad4e595eb139fd4a4c333e"
+key="$HOME/.xdns-signing/X-dns-release.p12"
+key_alias="xdns-release"
+cd "$HOME/X-dns"
+[[ "$(git branch --show-current)" == "$branch" ]] || { echo "Нужна ветка $branch"; exit 1; }
+[[ -z "$(git status --porcelain)" ]] || { echo "Есть несохранённые изменения:"; git status --short; exit 1; }
+git merge-base --is-ancestor "$verified" HEAD
+[[ -f "$key" ]] || { echo "Не найден прежний ключ: $key. Новый ключ не создаётся."; exit 1; }
+[[ -d "$HOME/storage/downloads" ]] || { echo "Выполни termux-setup-storage"; exit 1; }
+for command_name in gh python apksigner; do
+  command -v "$command_name" >/dev/null || pkg install "$command_name" -y
 done
+command -v keytool >/dev/null || pkg install openjdk-21 -y
+gh auth status
+sha=$(git rev-parse HEAD)
+work=$(mktemp -d)
+trap 'unset XDNS_KS_PASS; rm -rf -- "$work"' EXIT
 
+# Read-only preflight: never overwrite an already published release.
+gh api "repos/$repo/releases?per_page=100" > "$work/releases.json"
+state=$(python - "$work/releases.json" "$tag" <<'PY'
+import json,sys
+for r in json.load(open(sys.argv[1])):
+    if r['tag_name']==sys.argv[2]:
+        print('draft' if r['draft'] else 'published');break
+PY
+)
+if [[ "$state" == published ]]; then
+  echo "$tag уже опубликован. Ничего не перезаписываем."
+  gh release view "$tag" --repo "$repo" --json url --jq .url
+  exit 0
+fi
+# Any pre-existing tag must resolve to the exact release commit.
+gh api "repos/$repo/git/matching-refs/tags/$tag" > "$work/refs.json"
+tag_exists=$(python - "$work/refs.json" "$tag" <<'PY'
+import json,sys
+print('yes' if any(r['ref']=='refs/tags/'+sys.argv[2] for r in json.load(open(sys.argv[1]))) else 'no')
+PY
+)
+if [[ "$tag_exists" == yes ]]; then
+  target=$(gh api "repos/$repo/commits/$tag" --jq .sha)
+  [[ "$target" == "$sha" ]] || { echo "Тег $tag указывает на другой коммит. Остановлено."; exit 1; }
+fi
+git -c credential.helper= -c 'credential.helper=!gh auth git-credential' \
+  push "https://github.com/$repo.git" "HEAD:refs/heads/$branch"
+
+list_runs() {
+  gh run list --repo "$repo" --workflow release-apk.yml --branch "$branch" \
+    --event workflow_dispatch --limit 100 --json databaseId,headSha,status,conclusion > "$work/runs.json"
+}
+select_run() {
+  python - "$work/runs.json" "$sha" "${1:-}" <<'PY'
+import json,sys
+excluded=set(json.load(open(sys.argv[3]))) if sys.argv[3] else set()
+for r in json.load(open(sys.argv[1])):
+    if r['databaseId'] not in excluded and r['headSha']==sys.argv[2] and (r['status']!='completed' or r['conclusion']=='success'):
+        print(r['databaseId']);break
+PY
+}
+list_runs
+run_id=$(select_run)
+if [[ -n "$run_id" ]]; then
+  count=$(gh api "repos/$repo/actions/runs/$run_id/artifacts" --jq '[.artifacts[] | select(.expired == false)] | length')
+  status=$(gh run view "$run_id" --repo "$repo" --json status --jq .status)
+  if [[ "$status" == completed && "$count" == 0 ]]; then run_id=""; fi
+fi
+if [[ -z "$run_id" ]]; then
+  python - "$work/runs.json" > "$work/old.json" <<'PY'
+import json,sys
+print(json.dumps([r['databaseId'] for r in json.load(open(sys.argv[1]))]))
+PY
+  gh workflow run release-apk.yml --repo "$repo" --ref "$branch"
+  for ((attempt=0; attempt<40; attempt++)); do
+    list_runs
+    run_id=$(select_run "$work/old.json")
+    [[ -z "$run_id" ]] || break
+    sleep 3
+  done
+fi
+[[ -n "$run_id" ]] || { echo "Сборка ещё не появилась. Повтори bash ~/X-dns/release-termux.sh"; exit 1; }
+if ! gh run watch "$run_id" --repo "$repo" --exit-status; then
+  gh run view "$run_id" --repo "$repo" --log-failed || true
+  exit 1
+fi
+actual=$(gh run view "$run_id" --repo "$repo" --json headSha --jq .headSha)
+[[ "$actual" == "$sha" ]] || { echo "Коммит сборки не совпал."; exit 1; }
+gh run download "$run_id" --repo "$repo" --name "X-dns-universal-v$version-unsigned" --dir "$work/unsigned"
+unsigned="$work/unsigned/X-dns-universal-v$version-unsigned.apk"
+test -s "$unsigned"
+if command -v zipalign >/dev/null; then
+  zipalign -f 4 "$unsigned" "$work/aligned.apk"
+  unsigned="$work/aligned.apk"
+fi
+# Compare the local key with the public certificate of the working release.
+gh release download v0.7.0 --repo "$repo" --pattern X-dns-release-cert.pem --dir "$work/previous"
+IFS= read -r -s -p "Пароль прежнего релизного ключа: " XDNS_KS_PASS
+printf '\n'
 export XDNS_KS_PASS
-
-if [[ ! -f "$KEYSTORE" ]]; then
-  echo "Creating NEW X-dns release signing key..."
-
-  keytool -genkeypair \
-    -keystore "$KEYSTORE" \
-    -storetype PKCS12 \
-    -alias "$ALIAS" \
-    -keyalg RSA \
-    -keysize 4096 \
-    -sigalg SHA256withRSA \
-    -validity 10000 \
-    -dname "CN=anonymouskeys, OU=X-dns, O=anonymouskeys" \
-    -storepass:env XDNS_KS_PASS \
-    -keypass:env XDNS_KS_PASS
-
-  chmod 600 "$KEYSTORE"
-else
-  echo "Reusing existing release signing key."
-
-  keytool -list \
-    -keystore "$KEYSTORE" \
-    -alias "$ALIAS" \
-    -storepass:env XDNS_KS_PASS \
-    >/dev/null
-fi
-
-keytool -exportcert \
-  -rfc \
-  -keystore "$KEYSTORE" \
-  -alias "$ALIAS" \
-  -storepass:env XDNS_KS_PASS \
-  -file "$CERT" \
-  >/dev/null
-
-FINGERPRINT="$(
-  keytool -list -v \
-    -keystore "$KEYSTORE" \
-    -alias "$ALIAS" \
-    -storepass:env XDNS_KS_PASS \
-    2>/dev/null \
-    | sed -n 's/^[[:space:]]*SHA256:[[:space:]]*//p' \
-    | head -n 1
-)"
-
-cat > "$KEY_INFO" <<INFO
-X-dns Android release signing key
-
-Repository: https://github.com/$REPO
-Alias: $ALIAS
-Keystore: $KEYSTORE
-Public certificate: $CERT
-SHA-256 certificate fingerprint:
-$FINGERPRINT
-
-IMPORTANT:
-Keep X-dns-release.p12 forever.
-Future APK updates must be signed by the same key.
-The password is NOT stored in this file.
-INFO
-
-chmod 600 "$KEY_INFO"
-
-echo
-echo "Certificate SHA-256:"
-echo "$FINGERPRINT"
-echo
-
-rm -rf "$WORK"
-mkdir -p "$WORK"
-
-echo "Triggering GitHub unsigned release build..."
-gh workflow run release-apk.yml \
-  --repo "$REPO" \
-  --ref main
-
-sleep 5
-
-RUN_ID="$(
-  gh run list \
-    --repo "$REPO" \
-    --workflow release-apk.yml \
-    --branch main \
-    --event workflow_dispatch \
-    --limit 1 \
-    --json databaseId \
-    --jq '.[0].databaseId'
-)"
-
-if [[ -z "$RUN_ID" || "$RUN_ID" == "null" ]]; then
-  echo "Could not find the new GitHub Actions run."
-  exit 1
-fi
-
-echo "GitHub Actions run: $RUN_ID"
-
-gh run watch "$RUN_ID" \
-  --repo "$REPO" \
-  --exit-status
-
-echo "Downloading unsigned artifact..."
-
-gh run download "$RUN_ID" \
-  --repo "$REPO" \
-  -n "$ARTIFACT" \
-  -D "$WORK"
-
-UNSIGNED="$WORK/X-dns-universal-v${VERSION}-unsigned.apk"
-
-if [[ ! -f "$UNSIGNED" ]]; then
-  echo "Unsigned APK not found: $UNSIGNED"
-  exit 1
-fi
-
-ALIGNED="$WORK/X-dns-universal-v${VERSION}-aligned.apk"
-
-ZIPALIGN="$(command -v zipalign || true)"
-
-if [[ -z "$ZIPALIGN" && -d "$HOME/android-sdk/build-tools" ]]; then
-  ZIPALIGN="$(
-    find "$HOME/android-sdk/build-tools" \
-      -type f \
-      -name zipalign \
-      -perm -u+x \
-      2>/dev/null \
-      | sort -V \
-      | tail -n 1
-  )"
-fi
-
-if [[ -n "$ZIPALIGN" ]]; then
-  echo "zipalign: $ZIPALIGN"
-  "$ZIPALIGN" -f 4 "$UNSIGNED" "$ALIGNED"
-else
-  echo "zipalign not found; signing Gradle output as produced."
-  cp "$UNSIGNED" "$ALIGNED"
-fi
-
-echo "Signing APK locally in Termux..."
-
-apksigner sign \
-  --ks "$KEYSTORE" \
-  --ks-key-alias "$ALIAS" \
-  --ks-pass env:XDNS_KS_PASS \
-  --key-pass env:XDNS_KS_PASS \
-  --out "$FINAL_APK" \
-  "$ALIGNED"
-
-echo
-echo "Verifying APK signature..."
-
-apksigner verify \
-  --verbose \
-  --print-certs \
-  "$FINAL_APK"
-
+keytool -exportcert -keystore "$key" -alias "$key_alias" \
+  -storepass:env XDNS_KS_PASS -file "$work/current.der" >/dev/null
+python - "$work/previous/X-dns-release-cert.pem" "$work/current.der" <<'PY'
+import sys,ssl,pathlib,hashlib
+old=ssl.PEM_cert_to_DER_cert(pathlib.Path(sys.argv[1]).read_text())
+current=pathlib.Path(sys.argv[2]).read_bytes()
+if hashlib.sha256(old).digest()!=hashlib.sha256(current).digest():
+    raise SystemExit('Этот ключ отличается от сертификата v0.7.0. Публикация остановлена.')
+print('Ключ совпадает с релизом v0.7.0')
+PY
+mkdir -p "$work/assets"
+apk="$work/assets/X-dns-universal-v$version.apk"
+apksigner sign --ks "$key" --ks-key-alias "$key_alias" \
+  --ks-pass env:XDNS_KS_PASS --key-pass env:XDNS_KS_PASS --out "$apk" "$unsigned"
 unset XDNS_KS_PASS
-XDNS_KS_PASS=""
+apksigner verify --verbose --print-certs "$apk" > "$work/verify.txt"
+cat "$work/verify.txt"
+python - "$work/current.der" "$work/verify.txt" "$work/assets/SIGNING-CERT-SHA256.txt" <<'PY'
+import hashlib,pathlib,re,sys
+expected=hashlib.sha256(pathlib.Path(sys.argv[1]).read_bytes()).hexdigest()
+# Accept both Signer #1 and V3.0 Signer output formats used by apksigner.
+found={s.replace(':','').lower() for s in re.findall(r'certificate SHA-256 digest:\s*([0-9a-fA-F:]+)',pathlib.Path(sys.argv[2]).read_text())}
+if found!={expected}:
+    raise SystemExit('Сертификат подписанного APK не совпал с проверенным ключом.')
+pathlib.Path(sys.argv[3]).write_text('X-dns v0.7.1\nAndroid signing certificate SHA-256:\n'+expected+'\n')
+PY
+cp "$work/previous/X-dns-release-cert.pem" "$work/assets/X-dns-release-cert.pem"
+(cd "$work/assets" && sha256sum "X-dns-universal-v$version.apk") > "$work/assets/SHA256SUMS.txt"
+cp release/NOTES-v0.7.1.md "$work/notes.md"
+printf '\nBuild commit: `%s`\n' "$sha" >> "$work/notes.md"
+cp "$apk" "$HOME/storage/downloads/"
 
-SHA_FILE="$WORK/SHA256SUMS.txt"
-CERT_COPY="$WORK/X-dns-release-cert.pem"
-FINGERPRINT_FILE="$WORK/SIGNING-CERT-SHA256.txt"
-NOTES="$WORK/RELEASE-NOTES.md"
-
-cp "$CERT" "$CERT_COPY"
-
-(
-  cd "$(dirname "$FINAL_APK")"
-  sha256sum "$(basename "$FINAL_APK")"
-) > "$SHA_FILE"
-
-cat > "$FINGERPRINT_FILE" <<INFO
-X-dns v$VERSION
-Android signing certificate SHA-256:
-
-$FINGERPRINT
-INFO
-
-cat > "$NOTES" <<'NOTES'
-# X-dns v0.7.0
-
-DoH + Dragon DPI • Route Rescue
-
-Highlights:
-- Universal Android APK
-- DoH resolver testing and saved resolver database
-- Dragon DPI full-traffic mode
-- learned route memory and failed-route cooldown
-- alternate DoH route rescue
-- YouTube / TikTok route health visibility
-- new X-dns winged dragon launcher icon
-- @anonymouskeys branding and Telegram link inside the app
-
-Telegram:
-https://t.me/anonymouskeys
-
-The APK in this release is signed locally by the project release key.
-The public signing certificate and SHA-256 certificate fingerprint are
-published with the release for verification.
-NOTES
-
-echo
-echo "Publishing GitHub Release $TAG ..."
-
-if gh release view "$TAG" \
-      --repo "$REPO" \
-      >/dev/null 2>&1; then
-
-  gh release upload "$TAG" \
-    "$FINAL_APK" \
-    "$SHA_FILE" \
-    "$CERT_COPY" \
-    "$FINGERPRINT_FILE" \
-    --repo "$REPO" \
-    --clobber
-
-  gh release edit "$TAG" \
-    --repo "$REPO" \
-    --title "X-dns v$VERSION" \
-    --notes-file "$NOTES"
-
+# Upload and verify as a draft; publish only when all asset bytes match.
+if [[ "$state" == draft ]]; then
+  gh release edit "$tag" --repo "$repo" --target "$sha" --title "X-dns v$version" --notes-file "$work/notes.md"
+  gh release upload "$tag" "$apk" "$work/assets/SHA256SUMS.txt" \
+    "$work/assets/X-dns-release-cert.pem" "$work/assets/SIGNING-CERT-SHA256.txt" --repo "$repo" --clobber
 else
-  gh release create "$TAG" \
-    "$FINAL_APK" \
-    "$SHA_FILE" \
-    "$CERT_COPY" \
-    "$FINGERPRINT_FILE" \
-    --repo "$REPO" \
-    --target main \
-    --title "X-dns v$VERSION" \
-    --notes-file "$NOTES"
+  gh release create "$tag" "$apk" "$work/assets/SHA256SUMS.txt" \
+    "$work/assets/X-dns-release-cert.pem" "$work/assets/SIGNING-CERT-SHA256.txt" \
+    --repo "$repo" --target "$sha" --title "X-dns v$version" --notes-file "$work/notes.md" --draft
 fi
-
-echo
-echo "=========================================="
-echo " RELEASE READY"
-echo "=========================================="
-echo "Signed APK:"
-echo "$FINAL_APK"
-echo
-echo "Signing key:"
-echo "$KEYSTORE"
-echo
-echo "Public certificate:"
-echo "$CERT"
-echo
-echo "DO NOT DELETE THE SIGNING KEY."
-echo "All future X-dns updates must use the same key."
-echo
-echo "GitHub release:"
-
-gh release view "$TAG" \
-  --repo "$REPO" \
-  --json url \
-  --jq '.url'
+gh release download "$tag" --repo "$repo" --dir "$work/verification" \
+  --pattern "X-dns-universal-v$version.apk" --pattern SHA256SUMS.txt \
+  --pattern X-dns-release-cert.pem --pattern SIGNING-CERT-SHA256.txt
+for name in "X-dns-universal-v$version.apk" SHA256SUMS.txt X-dns-release-cert.pem SIGNING-CERT-SHA256.txt; do
+  cmp "$work/assets/$name" "$work/verification/$name"
+done
+gh release edit "$tag" --repo "$repo" --draft=false --latest
+echo "ГОТОВО: $HOME/storage/downloads/X-dns-universal-v$version.apk"
+gh release view "$tag" --repo "$repo" --json url --jq .url

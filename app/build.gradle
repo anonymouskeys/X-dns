@@ -10,8 +10,8 @@ android {
         applicationId "com.anonymouskeys.xdns"
         minSdk 26
         targetSdk 34
-        versionCode 16
-        versionName "0.7.0-network-reset"
+        versionCode 17
+        versionName "0.7.1"
     }
 
     signingConfigs {

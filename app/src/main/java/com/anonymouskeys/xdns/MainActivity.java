@@ -215,7 +215,7 @@ public class MainActivity extends Activity {
 
         TextView subtitle =
                 text(
-                        "DoH + Dragon DPI • Route Rescue • v0.7.0-network-reset",
+                        "DoH + Dragon DPI • Route Rescue • v0.7.1",
                         15,
                         Color.rgb(170, 174, 185)
                 );
@@ -714,7 +714,7 @@ public class MainActivity extends Activity {
             ClipboardManager clipboard = (ClipboardManager) getSystemService(CLIPBOARD_SERVICE);
             if (clipboard != null) {
                 clipboard.setPrimaryClip(ClipData.newPlainText("X-dns log",
-                        "X-dns 0.7.0-network-reset\n" + DnsLog.getText()));
+                        "X-dns 0.7.1\n" + DnsLog.getText()));
                 Toast.makeText(this, "Log copied", Toast.LENGTH_SHORT).show();
             }
         });
