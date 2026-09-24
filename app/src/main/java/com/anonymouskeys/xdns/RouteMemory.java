@@ -33,6 +33,19 @@ public final class RouteMemory {
 
     private RouteMemory() {}
 
+    public static synchronized void reset(SharedPreferences prefs) {
+        GOOD.clear();
+        BAD.clear();
+        DOMAIN_GOOD.clear();
+        FAILURE_LOG.clear();
+        loaded = true;
+        SharedPreferences.Editor edit = prefs.edit().remove(KEY_GOOD);
+        for (String service : new String[]{"youtube", "instagram", "tiktok"}) {
+            edit.remove("health_ok_" + service).remove("health_fail_" + service);
+        }
+        edit.apply();
+    }
+
     private static final class Good {
         final String host;
         final int port;
@@ -227,6 +240,7 @@ public final class RouteMemory {
         load(prefs);
 
         return "Learned routes: " + GOOD.size()
+                + "\nConnection signals only; video playback is not verified."
                 + "\nYouTube " + state(prefs, "youtube")
                 + "   Instagram " + state(prefs, "instagram")
                 + "   TikTok " + state(prefs, "tiktok");

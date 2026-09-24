@@ -117,6 +117,10 @@ public class XDnsVpnService extends VpnService {
                             MODE_PRIVATE
                     );
 
+            DohClient.resetTransport();
+            FastDoh.clearCache();
+            RouteMemory.reset(prefs);
+
             String mode = prefs.getString(
                     KEY_MODE,
                     MODE_DOH
@@ -550,7 +554,6 @@ public class XDnsVpnService extends VpnService {
     }
 
     private void stopNow() {
-        running = false;
 
         if (tunThread != null) {
             tunThread.interrupt();
@@ -584,11 +587,13 @@ public class XDnsVpnService extends VpnService {
             dohPool.shutdownNow();
         }
 
+        DohClient.resetTransport();
         runningStrategy = "";
 
         stopForegroundCompat();
         stopSelf();
 
+        running = false;
         DnsLog.addRaw("STOP completed");
     }
 

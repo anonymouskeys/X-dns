@@ -24,7 +24,21 @@ public final class SocksDohBridge {
     private final ExecutorService clients =
             Executors.newCachedThreadPool();
 
+    private final java.util.Set<Socket> sockets = java.util.concurrent.ConcurrentHashMap.newKeySet();
     private volatile boolean running;
+
+    private synchronized Socket track(Socket socket) throws IOException {
+        if (!running) {
+            closeQuietly(socket);
+            throw new IOException("Bridge stopped");
+        }
+        sockets.add(socket);
+        return socket;
+    }
+
+    private void ensureActive() throws IOException {
+        if (!running || Thread.currentThread().isInterrupted()) throw new IOException("Bridge stopped");
+    }
     private ServerSocket server;
     private Thread acceptThread;
     private SharedPreferences prefs;
@@ -85,6 +99,7 @@ public final class SocksDohBridge {
             acceptThread = null;
         }
 
+        for (Socket socket : sockets) closeQuietly(socket);
         clients.shutdownNow();
         FastDoh.clearCache();
     }
@@ -92,7 +107,7 @@ public final class SocksDohBridge {
     private void acceptLoop() {
         while (running) {
             try {
-                Socket client = server.accept();
+                Socket client = track(server.accept());
 
                 client.setTcpNoDelay(true);
 
@@ -115,6 +130,7 @@ public final class SocksDohBridge {
         Socket upstream = null;
 
         try {
+            ensureActive();
             client.setSoTimeout(10_000);
 
             Request request =
@@ -140,6 +156,7 @@ public final class SocksDohBridge {
                         );
             }
 
+            ensureActive();
             String rememberedBefore =
                     RouteMemory.preferred(
                             prefs,
@@ -179,6 +196,7 @@ public final class SocksDohBridge {
                 } catch (Exception e) {
                     last = e;
 
+                    ensureActive();
                     RouteMemory.domainFailure(
                             request.host,
                             request.port
@@ -210,6 +228,7 @@ public final class SocksDohBridge {
                         last = e;
                         rejected++;
 
+                        ensureActive();
                         RouteMemory.failure(
                                 prefs,
                                 request.host,
@@ -276,6 +295,7 @@ public final class SocksDohBridge {
                         last = e;
                         rejected++;
 
+                        ensureActive();
                         RouteMemory.failure(
                                 prefs,
                                 request.host,
@@ -300,6 +320,7 @@ public final class SocksDohBridge {
                     connectedIp = "domain";
                     domainRescue = true;
 
+                    ensureActive();
                     RouteMemory.domainSuccess(
                             prefs,
                             request.host,
@@ -317,6 +338,7 @@ public final class SocksDohBridge {
                 } catch (Exception e) {
                     last = e;
 
+                    ensureActive();
                     RouteMemory.domainFailure(
                             request.host,
                             request.port
@@ -356,6 +378,7 @@ public final class SocksDohBridge {
                 }
             }
 
+            ensureActive();
             if (upstream == null) {
                 RouteMemory.routeFailed(
                         prefs,
@@ -389,6 +412,7 @@ public final class SocksDohBridge {
                 );
             }
 
+            ensureActive();
             boolean changed = false;
 
             if (domainRescue) {
@@ -490,7 +514,7 @@ public final class SocksDohBridge {
 
             String message = safeMessage(e);
 
-            if (!"route unavailable".equals(message)
+            if (running && !"route unavailable".equals(message)
                     && !message.contains("Socket closed")
                     && !message.contains("Broken pipe")
                     && !message.contains("Connection reset")) {
@@ -618,7 +642,7 @@ public final class SocksDohBridge {
             int port
     ) throws Exception {
 
-        Socket socket = new Socket();
+        Socket socket = track(new Socket());
 
         socket.connect(
                 new InetSocketAddress(
@@ -761,7 +785,7 @@ public final class SocksDohBridge {
             );
         }
 
-        Socket socket = new Socket();
+        Socket socket = track(new Socket());
 
         socket.connect(
                 new InetSocketAddress(
@@ -889,7 +913,7 @@ public final class SocksDohBridge {
             int port
     ) throws Exception {
 
-        Socket socket = new Socket();
+        Socket socket = track(new Socket());
 
         socket.connect(
                 new InetSocketAddress(
@@ -1016,11 +1040,11 @@ public final class SocksDohBridge {
         return data;
     }
 
-    private static void closeQuietly(
+    private void closeQuietly(
             Socket socket
     ) {
         if (socket == null) return;
-
+        sockets.remove(socket);
         try {
             socket.close();
         } catch (Exception ignored) {

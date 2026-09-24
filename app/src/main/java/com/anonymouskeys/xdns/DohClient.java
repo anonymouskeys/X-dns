@@ -29,6 +29,11 @@ public final class DohClient {
 
     private DohClient() {}
 
+    public static void resetTransport() {
+        CLIENT.dispatcher().cancelAll();
+        CLIENT.connectionPool().evictAll();
+    }
+
     public static final class Result {
         public final byte[] body;
         public final long latencyMs;

@@ -101,7 +101,7 @@ public final class AutoTuner {
 
             long deadline =
                     System.currentTimeMillis()
-                            + 3000;
+                            + 10000;
 
             while (XDnsVpnService.isRunning()
                     && System.currentTimeMillis()
@@ -119,8 +119,14 @@ public final class AutoTuner {
             }
         }
 
-        DnsLog.beginSession("AUTO tuner");
+        // Match a fresh install's network state, while keeping user settings and catalog URLs.
+        DohClient.resetTransport();
         FastDoh.clearCache();
+        RouteMemory.reset(prefs);
+        ResolverStore.resetResults(prefs);
+        prefs.edit().remove(XDnsVpnService.KEY_AUTO_PROFILE).apply();
+        DnsLog.beginSession("AUTO • fresh network state");
+        DnsLog.addRaw("RESET • DNS results, learned routes, failed routes, health and HTTP pool cleared");
 
         progress(listener, "AUTO • loading resolver database");
 

@@ -179,6 +179,8 @@ public final class FastDoh {
             String host
     ) throws Exception {
 
+        long generation = cacheGeneration;
+
         String key =
                 host.toLowerCase(Locale.ROOT);
 
@@ -219,7 +221,8 @@ public final class FastDoh {
             if (!primaryAddresses.isEmpty()) {
                 remember(
                         key,
-                        primaryAddresses
+                        primaryAddresses,
+                        generation
                 );
 
                 DnsLog.addRaw(
@@ -261,7 +264,8 @@ public final class FastDoh {
 
         remember(
                 key,
-                fallback
+                fallback,
+                generation
         );
 
         return fallback;
@@ -340,7 +344,10 @@ public final class FastDoh {
         );
     }
 
-    public static void clearCache() {
+    private static volatile long cacheGeneration;
+
+    public static synchronized void clearCache() {
+        cacheGeneration++;
         ADDRESS_CACHE.clear();
     }
 
@@ -453,10 +460,12 @@ public final class FastDoh {
         return new ArrayList<>(addresses);
     }
 
-    private static void remember(
+    private static synchronized void remember(
             String key,
-            List<String> addresses
+            List<String> addresses,
+            long generation
     ) {
+        if (generation != cacheGeneration) return;
         ADDRESS_CACHE.put(
                 key,
                 new CacheEntry(

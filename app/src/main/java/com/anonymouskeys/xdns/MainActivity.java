@@ -215,7 +215,7 @@ public class MainActivity extends Activity {
 
         TextView subtitle =
                 text(
-                        "DoH + Dragon DPI • Route Rescue • v0.7.0",
+                        "DoH + Dragon DPI • Route Rescue • v0.7.0-network-reset",
                         15,
                         Color.rgb(170, 174, 185)
                 );
@@ -387,7 +387,7 @@ public class MainActivity extends Activity {
 
         autoButton =
                 button(
-                        "AUTO: BEST DOH + DPI FOR YOUTUBE"
+                        "AUTO: RETEST CURRENT NETWORK"
                 );
 
         root.addView(
@@ -706,6 +706,17 @@ public class MainActivity extends Activity {
         clear.setOnClickListener(v -> {
             DnsLog.clear();
             updateUi();
+        });
+
+        Button copyLog = button("COPY LOG");
+        root.addView(copyLog, matchButtonParams());
+        copyLog.setOnClickListener(v -> {
+            ClipboardManager clipboard = (ClipboardManager) getSystemService(CLIPBOARD_SERVICE);
+            if (clipboard != null) {
+                clipboard.setPrimaryClip(ClipData.newPlainText("X-dns log",
+                        "X-dns 0.7.0-network-reset\n" + DnsLog.getText()));
+                Toast.makeText(this, "Log copied", Toast.LENGTH_SHORT).show();
+            }
         });
 
         logText =
@@ -1064,22 +1075,13 @@ public class MainActivity extends Activity {
             return;
         }
 
-        if (XDnsVpnService.isRunning()) {
-            Toast.makeText(
-                    this,
-                    "Stop X-dns before AUTO tuning",
-                    Toast.LENGTH_LONG
-            ).show();
-            return;
-        }
-
         autoTuning = true;
         autoButton.setEnabled(false);
 
         int ttl = readTtl();
 
         autoResult.setText(
-                "AUTO • starting…"
+                "AUTO • stopping VPN and clearing previous network results…"
         );
 
         new Thread(() -> {
