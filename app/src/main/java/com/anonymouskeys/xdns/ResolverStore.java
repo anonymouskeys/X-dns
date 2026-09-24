@@ -21,6 +21,17 @@ public final class ResolverStore {
 
     private ResolverStore() {}
 
+    public static synchronized void resetResults(SharedPreferences prefs) {
+        Map<String, Entry> db = load(prefs);
+        for (Entry e : db.values()) {
+            e.status = UNKNOWN;
+            e.latencyMs = e.checkedAt = 0;
+            e.attempts = e.successes = 0;
+            e.method = e.error = "";
+        }
+        save(prefs, db);
+    }
+
     public static final class Entry {
         public String name;
         public String url;

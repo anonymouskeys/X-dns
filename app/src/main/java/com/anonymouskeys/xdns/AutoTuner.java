@@ -86,6 +86,19 @@ public final class AutoTuner {
             int fakeTtl,
             Listener listener
     ) {
+        if (!BUSY.compareAndSet(false, true)) return fail("Full retest already running");
+        try {
+            return runExclusive(context, prefs, fakeTtl, listener);
+        } finally {
+            BUSY.set(false);
+        }
+    }
+
+    private static final java.util.concurrent.atomic.AtomicBoolean BUSY =
+            new java.util.concurrent.atomic.AtomicBoolean();
+
+    private static Result runExclusive(Context context, SharedPreferences prefs,
+            int fakeTtl, Listener listener) {
         if (XDnsVpnService.isRunning()) {
             Intent stop =
                     new Intent(
@@ -101,7 +114,7 @@ public final class AutoTuner {
 
             long deadline =
                     System.currentTimeMillis()
-                            + 3000;
+                            + 10000;
 
             while (XDnsVpnService.isRunning()
                     && System.currentTimeMillis()
@@ -119,44 +132,38 @@ public final class AutoTuner {
             }
         }
 
-        DnsLog.beginSession("AUTO tuner");
+        try (TestNetwork network = new TestNetwork(context)) {
+            return runFresh(context, prefs, fakeTtl, listener, network);
+        } catch (Exception e) {
+            ResolverStore.resetResults(prefs);
+            prefs.edit().remove(XDnsVpnService.KEY_AUTO_PROFILE).apply();
+            return fail(safeMessage(e));
+        }
+    }
+
+    private static Result runFresh(Context context, SharedPreferences prefs,
+            int fakeTtl, Listener listener, TestNetwork network) throws Exception {
+        DnsLog.beginSession("Full DNS + DPI retest");
         FastDoh.clearCache();
-
-        progress(listener, "AUTO • loading resolver database");
-
+        RouteMemory.reset(prefs);
+        ResolverStore.resetResults(prefs);
+        prefs.edit().remove(XDnsVpnService.KEY_AUTO_PROFILE).apply();
+        network.check();
         ensureCatalogSaved(prefs, listener);
-        ensureSomeResolversWork(prefs, listener);
+        network.check();
 
-        List<ResolverStore.Entry> working =
-                ResolverStore.working(prefs);
-
-        if (working.isEmpty()) {
-            return fail("no working DoH resolver");
-        }
-
-        // Re-benchmark the current best five with 3 real DNS queries.
-        int benchmarkCount = Math.min(12, working.size());
-
-        for (int i = 0; i < benchmarkCount; i++) {
-            ResolverStore.Entry entry = working.get(i);
-
-            progress(
-                    listener,
-                    "AUTO • benchmark DoH "
-                            + (i + 1) + "/" + benchmarkCount
-                            + " • " + entry.name
-            );
-
+        List<ResolverStore.Entry> all = ResolverStore.all(prefs);
+        for (int i = 0; i < all.size(); i++) {
+            network.check();
+            ResolverStore.Entry entry = all.get(i);
+            progress(listener, "FULL • DNS " + (i + 1) + "/" + all.size()
+                    + " • " + entry.name);
             benchmarkResolver(prefs, entry);
+            network.check();
         }
-
-        working = ResolverStore.working(prefs);
-
-        if (working.isEmpty()) {
-            return fail("DoH candidates failed 3-probe benchmark");
-        }
-
-        int resolverCount = Math.min(5, working.size());
+        List<ResolverStore.Entry> working = ResolverStore.working(prefs);
+        if (working.isEmpty()) return fail("no working DoH resolver on this network");
+        int resolverCount = working.size();
 
         List<DpiStrategies.Preset> strategies =
                 DpiStrategies.candidates(fakeTtl);
@@ -186,6 +193,7 @@ public final class AutoTuner {
                                 + "/" + strategies.size()
                 );
 
+                network.check();
                 DragonByeDpi dpi = new DragonByeDpi();
 
                 try {
@@ -223,9 +231,7 @@ public final class AutoTuner {
                                         + " ms"
                         );
 
-                        // Keep the first working strategy for this resolver.
-                        // Candidate order intentionally goes from simple to strong.
-                        break;
+                        // Full retest measures every preset, including later candidates.
                     } else {
                         progress(
                                 listener,
@@ -247,8 +253,11 @@ public final class AutoTuner {
                                     + safeMessage(e)
                     );
                 } finally {
+                    boolean interrupted = Thread.currentThread().isInterrupted();
                     dpi.stop();
+                    if (interrupted) Thread.currentThread().interrupt();
                 }
+                network.check();
             }
         }
 
@@ -260,6 +269,7 @@ public final class AutoTuner {
                 Comparator.comparingLong(PairCandidate::score)
         );
 
+        network.check();
         PairCandidate best = winners.get(0);
 
         prefs.edit()
@@ -271,6 +281,7 @@ public final class AutoTuner {
                         XDnsVpnService.KEY_DPI_STRATEGY,
                         best.strategy.id
                 )
+                .putBoolean(XDnsVpnService.KEY_FORCE_TCP, true)
                 .putString(
                         XDnsVpnService.KEY_MODE,
                         XDnsVpnService.MODE_DRAGON_DPI
@@ -286,6 +297,7 @@ public final class AutoTuner {
                 )
                 .apply();
 
+        network.check();
         return new Result(
                 true,
                 best.resolver.name,
@@ -332,56 +344,6 @@ public final class AutoTuner {
                     "AUTO • catalog unavailable: "
                             + safeMessage(e)
             );
-        }
-    }
-
-    private static void ensureSomeResolversWork(
-            SharedPreferences prefs,
-            Listener listener
-    ) {
-        List<ResolverStore.Entry> working =
-                ResolverStore.working(prefs);
-
-        if (working.size() >= 3) return;
-
-        List<ResolverStore.Entry> all =
-                ResolverStore.all(prefs);
-
-        // Test built-ins and up to 60 saved catalog entries here.
-        // The dedicated FIND + TEST button still tests the full saved catalog.
-        int tested = 0;
-
-        for (ResolverStore.Entry entry : all) {
-            if (ResolverStore.OK.equals(entry.status)) {
-                continue;
-            }
-
-            progress(
-                    listener,
-                    "AUTO • checking DoH • " + entry.name
-            );
-
-            DohClient.Result result =
-                    DohClient.query(
-                            entry.url,
-                            DohClient.makeTestQuery("example.com")
-                    );
-
-            ResolverStore.saveResult(
-                    prefs,
-                    entry.url,
-                    entry.name,
-                    result
-            );
-
-            tested++;
-
-            if (result.ok()) {
-                working = ResolverStore.working(prefs);
-                if (working.size() >= 5) return;
-            }
-
-            if (tested >= 60) return;
         }
     }
 

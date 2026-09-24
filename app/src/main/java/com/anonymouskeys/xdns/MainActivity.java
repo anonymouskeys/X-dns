@@ -132,6 +132,8 @@ public class MainActivity extends Activity {
     private long lastSpeedSample = -1;
 
     private volatile boolean autoTuning = false;
+    private Thread fullTestThread;
+    private android.app.ProgressDialog fullTestDialog;
 
     @Override
     protected void onCreate(
@@ -160,6 +162,8 @@ public class MainActivity extends Activity {
 
     @Override
     protected void onDestroy() {
+        if (fullTestThread != null) fullTestThread.interrupt();
+        if (fullTestDialog != null) fullTestDialog.dismiss();
         handler.removeCallbacks(uiTicker);
         super.onDestroy();
     }
@@ -387,7 +391,7 @@ public class MainActivity extends Activity {
 
         autoButton =
                 button(
-                        "AUTO: BEST DOH + DPI FOR YOUTUBE"
+                        "FULL RETEST: ALL DNS + DPI (YOUTUBE)"
                 );
 
         root.addView(
@@ -1064,39 +1068,46 @@ public class MainActivity extends Activity {
             return;
         }
 
-        if (XDnsVpnService.isRunning()) {
-            Toast.makeText(
-                    this,
-                    "Stop X-dns before AUTO tuning",
-                    Toast.LENGTH_LONG
-            ).show();
-            return;
-        }
-
         autoTuning = true;
         autoButton.setEnabled(false);
 
         int ttl = readTtl();
 
         autoResult.setText(
-                "AUTO • starting…"
+                "FULL • stopping VPN and testing this network…"
         );
 
-        new Thread(() -> {
+        fullTestDialog = new android.app.ProgressDialog(this);
+        fullTestDialog.setTitle("Full DNS + DPI retest");
+        fullTestDialog.setMessage("Testing current network. This can take a long time.");
+        fullTestDialog.setCancelable(false);
+        fullTestDialog.setButton(android.content.DialogInterface.BUTTON_NEGATIVE,
+                "Cancel", (dialog, which) -> {
+                    if (fullTestThread != null) fullTestThread.interrupt();
+                });
+        fullTestDialog.show();
+
+        fullTestThread = new Thread(() -> {
             AutoTuner.Result result =
                     AutoTuner.run(
                             this,
                             prefs,
                             ttl,
                             text -> runOnUiThread(
-                                    () -> autoResult
-                                            .setText(text)
+                                    () -> {
+                                        if (isDestroyed()) return;
+                                        autoResult.setText(text);
+                                        fullTestDialog.setMessage(text);
+                                    }
                             )
                     );
 
             runOnUiThread(() -> {
                 autoTuning = false;
+                if (isDestroyed()) return;
+                fullTestDialog.dismiss();
                 autoButton.setEnabled(true);
+                loadDohOptions();
 
                 if (result.ok) {
                     autoResult.setText(
@@ -1118,10 +1129,7 @@ public class MainActivity extends Activity {
                             Toast.LENGTH_LONG
                     ).show();
 
-                    handler.postDelayed(
-                            this::requestVpn,
-                            350
-                    );
+                    requestVpn();
 
                 } else {
                     autoResult.setText(
@@ -1133,10 +1141,12 @@ public class MainActivity extends Activity {
                     );
                 }
             });
-        }, "xdns-auto-tuner").start();
+        }, "xdns-auto-tuner");
+        fullTestThread.start();
     }
 
     private void addCustomDoh() {
+        if (autoTuning) return;
         String url =
                 customDoh.getText()
                         .toString()
@@ -1220,6 +1230,7 @@ public class MainActivity extends Activity {
     }
 
     private void testCurrentDoh() {
+        if (autoTuning) return;
         String url = currentDoh();
 
         ResolverStore.Entry e =
@@ -1338,6 +1349,7 @@ public class MainActivity extends Activity {
     }
 
     private void testBuiltins() {
+        if (autoTuning) return;
         final ArrayList<Map.Entry<String, String>>
                 entries =
                 new ArrayList<>(
@@ -1464,6 +1476,7 @@ public class MainActivity extends Activity {
     }
 
     private void discoverAndTest() {
+        if (autoTuning) return;
         testResult.setText(
                 "Downloading public DoH catalog…"
         );
@@ -1831,6 +1844,7 @@ public class MainActivity extends Activity {
     }
 
     private void requestVpn() {
+        if (autoTuning) return;
         Intent permissionIntent =
                 VpnService.prepare(this);
 

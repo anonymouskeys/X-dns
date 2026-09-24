@@ -550,7 +550,6 @@ public class XDnsVpnService extends VpnService {
     }
 
     private void stopNow() {
-        running = false;
 
         if (tunThread != null) {
             tunThread.interrupt();
@@ -589,6 +588,7 @@ public class XDnsVpnService extends VpnService {
         stopForegroundCompat();
         stopSelf();
 
+        running = false;
         DnsLog.addRaw("STOP completed");
     }
 
