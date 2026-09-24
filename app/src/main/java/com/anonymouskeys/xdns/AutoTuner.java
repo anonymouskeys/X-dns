@@ -55,7 +55,7 @@ public final class AutoTuner {
             return "DoH: " + dohName
                     + " • " + dohLatencyMs + " ms"
                     + "\nDPI: " + strategyName
-                    + "\nYouTube: " + youtubeLatencyMs + " ms";
+                    + "\nYouTube HTTPS: " + youtubeLatencyMs + " ms";
         }
     }
 
@@ -120,6 +120,18 @@ public final class AutoTuner {
         }
     }
 
+    static List<DpiStrategies.Preset> orderedStrategies(String selected, int ttl) {
+        List<DpiStrategies.Preset> all = DpiStrategies.candidates(ttl);
+        java.util.LinkedHashMap<String, DpiStrategies.Preset> ordered = new java.util.LinkedHashMap<>();
+        for (String id : new String[]{selected, "maximum", "auto_compat"}) {
+            for (DpiStrategies.Preset preset : all) {
+                if (preset.id.equals(id)) ordered.put(preset.id, preset);
+            }
+        }
+        for (DpiStrategies.Preset preset : all) ordered.put(preset.id, preset);
+        return new ArrayList<>(ordered.values());
+    }
+
     private static final long DNS_BUDGET_MS = 90_000;
     private static final long DPI_BUDGET_MS = 150_000;
 
@@ -150,7 +162,11 @@ public final class AutoTuner {
         if (working.isEmpty()) return fail("No working DNS within 90 seconds; untested entries remain unknown");
         working.sort(Comparator.comparingLong(e -> e.latencyMs));
 
-        List<DpiStrategies.Preset> strategies = DpiStrategies.candidates(fakeTtl);
+        List<DpiStrategies.Preset> strategies = orderedStrategies(
+                prefs.getString(XDnsVpnService.KEY_DPI_STRATEGY, "maximum"), fakeTtl);
+        String selectedUrl = prefs.getString(XDnsVpnService.KEY_DOH_URL, XDnsVpnService.DEFAULT_DOH);
+        // Preserve preference only if it passed a fresh DNS test on this network.
+        working.sort(Comparator.comparingInt(e -> selectedUrl.equals(e.url) ? 0 : 1));
         java.util.concurrent.ExecutorService worker = java.util.concurrent.Executors.newSingleThreadExecutor();
         long deadline = now() + DPI_BUDGET_MS;
         int resolverCount = Math.min(5, working.size());
@@ -165,6 +181,7 @@ public final class AutoTuner {
                     ResolverStore.Entry resolver = working.get(r);
                     String label = "DPI " + (++attempt) + "/" + (resolverCount * strategies.size())
                             + " • " + resolver.name + " + " + strategy.name;
+                    DnsLog.addRaw(label);
                     DragonByeDpi dpi = new DragonByeDpi();
                     YoutubeProbe.Result probe = null;
                     try {
@@ -187,7 +204,11 @@ public final class AutoTuner {
                         if (interrupted) Thread.currentThread().interrupt();
                     }
                     network.check();
-                    if (probe == null || !probe.ok) continue;
+                    if (probe == null) continue;
+                    if (!probe.ok) {
+                        progress(listener, label + " • FAIL • " + probe.error);
+                        continue;
+                    }
                     prefs.edit()
                             .putString(XDnsVpnService.KEY_DOH_URL, resolver.url)
                             .putString(XDnsVpnService.KEY_DPI_STRATEGY, strategy.id)
@@ -220,7 +241,7 @@ public final class AutoTuner {
         try {
             for (ResolverStore.Entry entry : all) {
                 completed.submit(() -> {
-                    try (ProbeControl control = new ProbeControl(6000)) {
+                    try (ProbeControl control = new ProbeControl(15000)) {
                         controls.add(control);
                         try {
                             control.enter();
@@ -232,7 +253,7 @@ public final class AutoTuner {
                             controls.remove(control);
                         }
                     } catch (java.io.IOException e) {
-                        return new CheckedDns(entry, new DohClient.Result(null, 6000, -1, "", e.getMessage()));
+                        return new CheckedDns(entry, new DohClient.Result(null, 15000, -1, "", e.getMessage()));
                     }
                 });
             }
@@ -270,8 +291,8 @@ public final class AutoTuner {
             String url) throws Exception {
         long remaining = deadline - now();
         if (remaining <= 0) throw new java.util.concurrent.TimeoutException("DPI time limit");
-        long probeDeadline = now() + Math.min(24_000, remaining);
-        try (ProbeControl control = new ProbeControl(Math.min(24_000, remaining))) {
+        long probeDeadline = now() + Math.min(40_000, remaining);
+        try (ProbeControl control = new ProbeControl(Math.min(40_000, remaining))) {
             java.util.concurrent.Future<YoutubeProbe.Result> future = worker.submit(() -> {
                 try {
                     control.enter();
@@ -313,7 +334,8 @@ public final class AutoTuner {
             listener.onProgress(text);
         }
 
-        DnsLog.addRaw(text);
+        // UI countdowns must not evict the actual per-host failure diagnostics.
+        if (!text.contains(" • remaining ")) DnsLog.addRaw(text);
     }
 
     private static Result fail(String error) {

@@ -8,7 +8,7 @@ import java.util.concurrent.atomic.AtomicLong;
 
 public final class DnsLog {
 
-    private static final int MAX_LOGS = 120;
+    private static final int MAX_LOGS = 600;
     private static final ArrayDeque<String> LOGS = new ArrayDeque<>();
 
     private static final AtomicLong QUERIES = new AtomicLong();

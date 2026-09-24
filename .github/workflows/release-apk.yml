@@ -23,109 +23,35 @@ jobs:
       - name: Set up Gradle
         uses: gradle/actions/setup-gradle@v4
 
-      - name: Select Android NDK
+      - name: Use native engine from verified v0.7.0 APK
         shell: bash
         run: |
           set -euo pipefail
-
-          WANTED="27.2.12479018"
-
-          use_ndk() {
-            local dir="$1"
-            if [[ -x "$dir/ndk-build" ]]; then
-              echo "Using Android NDK: $dir"
-              echo "NDK_HOME=$dir" >> "$GITHUB_ENV"
-              return 0
-            fi
-            return 1
-          }
-
-          if use_ndk "$ANDROID_HOME/ndk/$WANTED"; then
-            exit 0
-          fi
-
-          if [[ -d "$ANDROID_HOME/ndk" ]]; then
-            while IFS= read -r version; do
-              [[ -z "$version" ]] && continue
-              if use_ndk "$ANDROID_HOME/ndk/$version"; then
-                exit 0
-              fi
-            done < <(
-              find "$ANDROID_HOME/ndk" \
-                -mindepth 1 \
-                -maxdepth 1 \
-                -type d \
-                -printf '%f\n' \
-                | sort -Vr
-            )
-          fi
-
-          SDKMANAGER="$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager"
-          yes | "$SDKMANAGER" --licenses >/dev/null || true
-
-          for attempt in 1 2 3; do
-            echo "Installing NDK $WANTED (attempt $attempt/3)"
-            rm -rf \
-              "$ANDROID_HOME/ndk/$WANTED" \
-              "$ANDROID_HOME/.temp" \
-              "$HOME/.android/cache"
-
-            if "$SDKMANAGER" "ndk;$WANTED"; then
-              if use_ndk "$ANDROID_HOME/ndk/$WANTED"; then
-                exit 0
-              fi
-            fi
-
-            sleep $((attempt * 10))
-          done
-
-          echo "::error::No usable Android NDK found or installed"
-          exit 1
-
-      - name: Build Dragon native DPI components
-        shell: bash
-        run: |
-          set -euxo pipefail
-
-          test -x "$NDK_HOME/ndk-build"
-
-          rm -rf "$RUNNER_TEMP/dragon"
-
-          git clone --depth 1 --branch monster-base \
-            https://github.com/anonymouskeys/Dragon-vpn.git \
-            "$RUNNER_TEMP/dragon"
-
-          rm -rf "$RUNNER_TEMP/dragon/hev-socks5-tunnel"
-
-          git clone \
-            --depth 1 \
-            --branch 2.17.1 \
-            --recurse-submodules \
-            --shallow-submodules \
-            https://github.com/heiher/hev-socks5-tunnel.git \
-            "$RUNNER_TEMP/dragon/hev-socks5-tunnel"
-
-          cd "$RUNNER_TEMP/dragon"
-
-          chmod +x compile-byedpi.sh compile-hevtun.sh
-          ./compile-byedpi.sh
-          ./compile-hevtun.sh
-
-          cd "$GITHUB_WORKSPACE"
-
-          rm -rf app/src/main/jniLibs
-
-          for abi in arm64-v8a armeabi-v7a x86 x86_64; do
-            mkdir -p "app/src/main/jniLibs/$abi"
-
-            cp \
-              "$RUNNER_TEMP/dragon/V2rayNG/app/libs/$abi/libciadpi.so" \
-              "app/src/main/jniLibs/$abi/libciadpi.so"
-
-            cp \
-              "$RUNNER_TEMP/dragon/libs/$abi/libhev-socks5-tunnel.so" \
-              "app/src/main/jniLibs/$abi/libhev-socks5-tunnel.so"
-          done
+          APK="$RUNNER_TEMP/X-dns-v0.7.0-reference.apk"
+          curl --fail --location --retry 3 \
+            https://github.com/anonymouskeys/X-dns/releases/download/v0.7.0/X-dns-universal-v0.7.0.apk \
+            --output "$APK"
+          printf '%s  %s\n' \
+            '1f5a99d3c24c5005e11c59d1c29b9675698c9ba6e7cc5b6092c94397832e2997' \
+            "$APK" | sha256sum --check -
+          python3 - "$APK" <<'PY'
+          import pathlib, shutil, sys, zipfile
+          target = pathlib.Path('app/src/main/jniLibs')
+          members = [(abi, name) for abi in ('arm64-v8a', 'armeabi-v7a', 'x86', 'x86_64')
+                     for name in ('libciadpi.so', 'libhev-socks5-tunnel.so')]
+          with zipfile.ZipFile(sys.argv[1]) as archive:
+              payloads = [(abi, name, archive.read(f'lib/{abi}/{name}')) for abi, name in members]
+          for abi, name, data in payloads:
+              if not data.startswith(b'\x7fELF'):
+                  raise SystemExit(f'Invalid ELF: {abi}/{name}')
+          if target.exists():
+              shutil.rmtree(target)
+          for abi, name, data in payloads:
+              path = target / abi / name
+              path.parent.mkdir(parents=True, exist_ok=True)
+              path.write_bytes(data)
+          print('Verified native libraries copied from the working v0.7.0 release')
+          PY
 
       - name: Build unsigned universal release APK
         run: |

@@ -219,7 +219,7 @@ public class MainActivity extends Activity {
 
         TextView subtitle =
                 text(
-                        "DoH + Dragon DPI • Route Rescue • v0.7.1-retest",
+                        "DoH + Dragon DPI • Route Rescue • v0.7.2-recovery",
                         15,
                         Color.rgb(170, 174, 185)
                 );
@@ -712,6 +712,21 @@ public class MainActivity extends Activity {
             updateUi();
         });
 
+        Button copyLog = button("COPY LOG");
+        root.addView(copyLog, matchButtonParams());
+        copyLog.setOnClickListener(v -> {
+            ClipboardManager clipboard = (ClipboardManager) getSystemService(CLIPBOARD_SERVICE);
+            if (clipboard != null) {
+                String report = "X-dns 0.7.2-recovery\n"
+                        + "Selected DNS: " + prefs.getString(XDnsVpnService.KEY_DOH_URL, "") + "\n"
+                        + "Selected DPI: " + prefs.getString(XDnsVpnService.KEY_DPI_STRATEGY, "maximum") + "\n"
+                        + "VPN active: " + XDnsVpnService.isRunning() + "\n"
+                        + DnsLog.getText();
+                clipboard.setPrimaryClip(ClipData.newPlainText("X-dns diagnostic log", report));
+                Toast.makeText(this, "Log copied", Toast.LENGTH_SHORT).show();
+            }
+        });
+
         logText =
                 text(
                         "No events yet.",
@@ -1125,7 +1140,7 @@ public class MainActivity extends Activity {
 
                     Toast.makeText(
                             this,
-                            "AUTO profile found. Starting Dragon DPI…",
+                            "HTTPS probe passed. Starting Dragon DPI; check video playback.",
                             Toast.LENGTH_LONG
                     ).show();
 

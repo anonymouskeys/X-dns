@@ -106,23 +106,36 @@ public final class YoutubeProbe {
         );
     }
 
-    private static HostResult probeHost(
-            String dohUrl,
-            String host
-    ) {
-        long started =
-                System.currentTimeMillis();
+    private static HostResult probeHost(String dohUrl, String host) {
+        try {
+            ProbeControl.check();
+            DohClient.Result dns = DohClient.query(dohUrl, DohClient.makeTestQuery(host));
+            if (!dns.ok()) throw new IllegalStateException("DOH: " + dns.error);
+            java.util.List<String> addresses = DnsPacket.allIpv4Addresses(dns.body);
+            if (addresses.isEmpty()) throw new IllegalStateException("DOH: no usable A answer");
+            HostResult last = null;
+            for (int i = 0; i < Math.min(3, addresses.size()); i++) {
+                ProbeControl.check();
+                String ip = addresses.get(i);
+                last = probeAddress(host, ip);
+                DnsLog.addRaw("PROBE • " + host + " • " + ip + " • "
+                        + (last.ok ? "HTTP " + last.httpCode : last.error));
+                if (last.ok) return last;
+            }
+            return last;
+        } catch (Exception e) {
+            String error = phaseError(e);
+            DnsLog.addRaw("PROBE • " + host + " • " + error);
+            return new HostResult(false, 0, -1, error);
+        }
+    }
 
+    private static HostResult probeAddress(String host, String ip) {
+        long started = System.currentTimeMillis();
         Socket socks = null;
 
         try {
             ProbeControl.check();
-            String ip =
-                    resolveViaDoh(
-                            dohUrl,
-                            host
-                    );
-
             socks =
                     connectLocalSocksWithRetry(
                             "127.0.0.1",
@@ -250,45 +263,6 @@ public final class YoutubeProbe {
                 }
             }
         }
-    }
-
-    private static String resolveViaDoh(
-            String dohUrl,
-            String hostname
-    ) throws Exception {
-
-        DohClient.Result result =
-                DohClient.query(
-                        dohUrl,
-                        DohClient.makeTestQuery(
-                                hostname
-                        )
-                );
-
-        if (!result.ok()) {
-            throw new IllegalStateException(
-                    "DOH: "
-                            + (result.error == null
-                            ? "failed"
-                            : result.error)
-            );
-        }
-
-        String ip =
-                DnsPacket.firstAddress(
-                        result.body
-                );
-
-        if (ip == null
-                || ip.isEmpty()
-                || "-".equals(ip)) {
-
-            throw new IllegalStateException(
-                    "DOH: no A answer"
-            );
-        }
-
-        return ip;
     }
 
     private static Socket connectLocalSocksWithRetry(
