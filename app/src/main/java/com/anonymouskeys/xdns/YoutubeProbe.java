@@ -116,6 +116,7 @@ public final class YoutubeProbe {
         Socket socks = null;
 
         try {
+            ProbeControl.check();
             String ip =
                     resolveViaDoh(
                             dohUrl,
@@ -151,6 +152,7 @@ public final class YoutubeProbe {
                                     true
                             );
 
+            ProbeControl.track(tls);
             tls.setSoTimeout(5000);
 
             SSLParameters parameters =
@@ -303,9 +305,8 @@ public final class YoutubeProbe {
 
         while (System.currentTimeMillis()
                 < end) {
-
-            Socket socket =
-                    new Socket();
+            ProbeControl.check();
+            Socket socket = ProbeControl.track(new Socket());
 
             try {
                 socket.connect(

@@ -96,7 +96,10 @@ public final class DohClient {
                     .post(body)
                     .build();
 
-            try (Response response = CLIENT.newCall(request).execute()) {
+            ProbeControl.check();
+            okhttp3.Call call = CLIENT.newCall(request);
+            ProbeControl.track((java.io.Closeable) call::cancel);
+            try (Response response = call.execute()) {
                 long latency = System.currentTimeMillis() - started;
                 byte[] bytes = bodyBytes(response.body());
 
@@ -157,7 +160,10 @@ public final class DohClient {
                     .get()
                     .build();
 
-            try (Response response = CLIENT.newCall(request).execute()) {
+            ProbeControl.check();
+            okhttp3.Call call = CLIENT.newCall(request);
+            ProbeControl.track((java.io.Closeable) call::cancel);
+            try (Response response = call.execute()) {
                 long latency = System.currentTimeMillis() - started;
                 byte[] bytes = bodyBytes(response.body());
 

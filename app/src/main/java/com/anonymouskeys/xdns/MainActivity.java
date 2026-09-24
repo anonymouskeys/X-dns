@@ -219,7 +219,7 @@ public class MainActivity extends Activity {
 
         TextView subtitle =
                 text(
-                        "DoH + Dragon DPI • Route Rescue • v0.7.0",
+                        "DoH + Dragon DPI • Route Rescue • v0.7.1-retest",
                         15,
                         Color.rgb(170, 174, 185)
                 );
@@ -391,7 +391,7 @@ public class MainActivity extends Activity {
 
         autoButton =
                 button(
-                        "FULL RETEST: ALL DNS + DPI (YOUTUBE)"
+                        "RETEST THIS NETWORK: DNS + DPI"
                 );
 
         root.addView(
@@ -1078,8 +1078,8 @@ public class MainActivity extends Activity {
         );
 
         fullTestDialog = new android.app.ProgressDialog(this);
-        fullTestDialog.setTitle("Full DNS + DPI retest");
-        fullTestDialog.setMessage("Testing current network. This can take a long time.");
+        fullTestDialog.setTitle("DNS + DPI retest");
+        fullTestDialog.setMessage("DNS: up to 90 s. DPI: up to 150 s. Stops after a confirmed working pair.");
         fullTestDialog.setCancelable(false);
         fullTestDialog.setButton(android.content.DialogInterface.BUTTON_NEGATIVE,
                 "Cancel", (dialog, which) -> {

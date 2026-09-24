@@ -5,7 +5,6 @@ import android.content.Intent;
 import android.content.SharedPreferences;
 
 import java.util.ArrayList;
-import java.util.Collections;
 import java.util.Comparator;
 import java.util.List;
 
@@ -57,26 +56,6 @@ public final class AutoTuner {
                     + " • " + dohLatencyMs + " ms"
                     + "\nDPI: " + strategyName
                     + "\nYouTube: " + youtubeLatencyMs + " ms";
-        }
-    }
-
-    private static final class PairCandidate {
-        final ResolverStore.Entry resolver;
-        final DpiStrategies.Preset strategy;
-        final YoutubeProbe.Result probe;
-
-        PairCandidate(
-                ResolverStore.Entry resolver,
-                DpiStrategies.Preset strategy,
-                YoutubeProbe.Result probe
-        ) {
-            this.resolver = resolver;
-            this.strategy = strategy;
-            this.probe = probe;
-        }
-
-        long score() {
-            return resolver.latencyMs + probe.latencyMs;
         }
     }
 
@@ -141,259 +120,189 @@ public final class AutoTuner {
         }
     }
 
+    private static final long DNS_BUDGET_MS = 90_000;
+    private static final long DPI_BUDGET_MS = 150_000;
+
+    private static long now() { return System.nanoTime() / 1_000_000; }
+
+    private static final class CheckedDns {
+        final ResolverStore.Entry entry;
+        final DohClient.Result result;
+        CheckedDns(ResolverStore.Entry entry, DohClient.Result result) {
+            this.entry = entry;
+            this.result = result;
+        }
+    }
+
     private static Result runFresh(Context context, SharedPreferences prefs,
             int fakeTtl, Listener listener, TestNetwork network) throws Exception {
-        DnsLog.beginSession("Full DNS + DPI retest");
+        DnsLog.beginSession("Fresh DNS + DPI test (bounded)");
         FastDoh.clearCache();
         RouteMemory.reset(prefs);
         ResolverStore.resetResults(prefs);
         prefs.edit().remove(XDnsVpnService.KEY_AUTO_PROFILE).apply();
         network.check();
-        ensureCatalogSaved(prefs, listener);
-        network.check();
 
+        // Use the saved catalog: catalog downloads must not delay a network retest.
         List<ResolverStore.Entry> all = ResolverStore.all(prefs);
-        for (int i = 0; i < all.size(); i++) {
-            network.check();
-            ResolverStore.Entry entry = all.get(i);
-            progress(listener, "FULL • DNS " + (i + 1) + "/" + all.size()
-                    + " • " + entry.name);
-            benchmarkResolver(prefs, entry);
-            network.check();
-        }
-        List<ResolverStore.Entry> working = ResolverStore.working(prefs);
-        if (working.isEmpty()) return fail("no working DoH resolver on this network");
-        int resolverCount = working.size();
-
-        List<DpiStrategies.Preset> strategies =
-                DpiStrategies.candidates(fakeTtl);
-
-        List<PairCandidate> winners = new ArrayList<>();
-
-        for (int r = 0; r < resolverCount; r++) {
-            ResolverStore.Entry resolver = working.get(r);
-
-            progress(
-                    listener,
-                    "AUTO • DoH candidate "
-                            + (r + 1) + "/" + resolverCount
-                            + " • " + resolver.name
-                            + " • " + resolver.latencyMs + " ms"
-            );
-
-            for (int s = 0; s < strategies.size(); s++) {
-                DpiStrategies.Preset strategy =
-                        strategies.get(s);
-
-                progress(
-                        listener,
-                        "AUTO • " + resolver.name
-                                + " + " + strategy.name
-                                + " • " + (s + 1)
-                                + "/" + strategies.size()
-                );
-
-                network.check();
-                DragonByeDpi dpi = new DragonByeDpi();
-
-                try {
-                    dpi.start(
-                            context,
-                            fakeTtl,
-                            strategy.id,
-                            true
-                    );
-
-                    YoutubeProbe.Result probe =
-                            YoutubeProbe.throughByeDpi(
-                                    resolver.url
-                            );
-
-                    if (probe.ok) {
-                        winners.add(
-                                new PairCandidate(
-                                        resolver,
-                                        strategy,
-                                        probe
-                                )
-                        );
-
-                        progress(
-                                listener,
-                                "AUTO • ✓ "
-                                        + resolver.name
-                                        + " + "
-                                        + strategy.name
-                                        + " • YouTube stack "
-                                        + probe.hostsOk
-                                        + "/4 • "
-                                        + probe.latencyMs
-                                        + " ms"
-                        );
-
-                        // Full retest measures every preset, including later candidates.
-                    } else {
-                        progress(
-                                listener,
-                                "AUTO • ✗ "
-                                        + strategy.name
-                                        + " • "
-                                        + (probe.error == null
-                                        ? "failed"
-                                        : probe.error)
-                        );
-                    }
-
-                } catch (Exception e) {
-                    progress(
-                            listener,
-                            "AUTO • ✗ "
-                                    + strategy.name
-                                    + " • "
-                                    + safeMessage(e)
-                    );
-                } finally {
-                    boolean interrupted = Thread.currentThread().isInterrupted();
-                    dpi.stop();
-                    if (interrupted) Thread.currentThread().interrupt();
-                }
-                network.check();
-            }
-        }
-
-        if (winners.isEmpty()) {
-            return fail("no DoH + DPI pair reached YouTube");
-        }
-
-        winners.sort(
-                Comparator.comparingLong(PairCandidate::score)
-        );
-
+        List<ResolverStore.Entry> working = scanDns(all, prefs, listener, network);
         network.check();
-        PairCandidate best = winners.get(0);
+        if (working.isEmpty()) return fail("No working DNS within 90 seconds; untested entries remain unknown");
+        working.sort(Comparator.comparingLong(e -> e.latencyMs));
 
-        prefs.edit()
-                .putString(
-                        XDnsVpnService.KEY_DOH_URL,
-                        best.resolver.url
-                )
-                .putString(
-                        XDnsVpnService.KEY_DPI_STRATEGY,
-                        best.strategy.id
-                )
-                .putBoolean(XDnsVpnService.KEY_FORCE_TCP, true)
-                .putString(
-                        XDnsVpnService.KEY_MODE,
-                        XDnsVpnService.MODE_DRAGON_DPI
-                )
-                .putString(
-                        XDnsVpnService.KEY_AUTO_PROFILE,
-                        best.resolver.name
-                                + " + "
-                                + best.strategy.name
-                                + " • "
-                                + best.probe.latencyMs
-                                + " ms"
-                )
-                .apply();
-
-        network.check();
-        return new Result(
-                true,
-                best.resolver.name,
-                best.resolver.url,
-                best.resolver.latencyMs,
-                best.strategy.id,
-                best.strategy.name,
-                best.probe.latencyMs,
-                null
-        );
-    }
-
-    private static void ensureCatalogSaved(
-            SharedPreferences prefs,
-            Listener listener
-    ) {
-        if (!ResolverStore.discovered(prefs).isEmpty()) {
-            return;
-        }
-
-        progress(listener, "AUTO • downloading public DoH catalog");
-
+        List<DpiStrategies.Preset> strategies = DpiStrategies.candidates(fakeTtl);
+        java.util.concurrent.ExecutorService worker = java.util.concurrent.Executors.newSingleThreadExecutor();
+        long deadline = now() + DPI_BUDGET_MS;
+        int resolverCount = Math.min(5, working.size());
+        int attempt = 0;
         try {
-            List<String> urls =
-                    DohCatalog.fetchPublicDohUrls();
-
-            for (String url : urls) {
-                ResolverStore.rememberDiscovered(
-                        prefs,
-                        url
-                );
+            // Try each strategy across the best fresh DNS candidates before moving on.
+            search:
+            for (DpiStrategies.Preset strategy : strategies) {
+                for (int r = 0; r < resolverCount; r++) {
+                    network.check();
+                    if (now() >= deadline) break search;
+                    ResolverStore.Entry resolver = working.get(r);
+                    String label = "DPI " + (++attempt) + "/" + (resolverCount * strategies.size())
+                            + " • " + resolver.name + " + " + strategy.name;
+                    DragonByeDpi dpi = new DragonByeDpi();
+                    YoutubeProbe.Result probe = null;
+                    try {
+                        dpi.start(context, fakeTtl, strategy.id, true);
+                        probe = probe(worker, network, deadline, listener, label, resolver.url);
+                        if (probe.ok) {
+                            // A second independent pass confirms all four HTTPS targets.
+                            probe = probe(worker, network, deadline, listener,
+                                    label + " • confirming 4/4", resolver.url);
+                        }
+                    } catch (InterruptedException e) {
+                        Thread.currentThread().interrupt();
+                        throw e;
+                    } catch (Exception e) {
+                        progress(listener, label + " • " + safeMessage(e));
+                        probe = null;
+                    } finally {
+                        boolean interrupted = Thread.currentThread().isInterrupted();
+                        dpi.stop();
+                        if (interrupted) Thread.currentThread().interrupt();
+                    }
+                    network.check();
+                    if (probe == null || !probe.ok) continue;
+                    prefs.edit()
+                            .putString(XDnsVpnService.KEY_DOH_URL, resolver.url)
+                            .putString(XDnsVpnService.KEY_DPI_STRATEGY, strategy.id)
+                            .putBoolean(XDnsVpnService.KEY_FORCE_TCP, true)
+                            .putString(XDnsVpnService.KEY_MODE, XDnsVpnService.MODE_DRAGON_DPI)
+                            .putString(XDnsVpnService.KEY_AUTO_PROFILE,
+                                    resolver.name + " + " + strategy.name + " • HTTPS 4/4 twice")
+                            .apply();
+                    network.check();
+                    return new Result(true, resolver.name, resolver.url, resolver.latencyMs,
+                            strategy.id, strategy.name, probe.latencyMs, null);
+                }
             }
-
-            progress(
-                    listener,
-                    "AUTO • saved "
-                            + urls.size()
-                            + " public DoH endpoints"
-            );
-
-        } catch (Exception e) {
-            progress(
-                    listener,
-                    "AUTO • catalog unavailable: "
-                            + safeMessage(e)
-            );
+            return fail("No confirmed DNS + DPI pair within the test budget. This does not prove every pair fails.");
+        } finally {
+            worker.shutdownNow();
         }
     }
 
-    private static void benchmarkResolver(
-            SharedPreferences prefs,
-            ResolverStore.Entry entry
-    ) {
-        List<Long> latencies = new ArrayList<>();
-        int success = 0;
-        String method = "";
-        String error = "";
+    private static List<ResolverStore.Entry> scanDns(List<ResolverStore.Entry> all,
+            SharedPreferences prefs, Listener listener, TestNetwork network) throws Exception {
+        java.util.concurrent.ExecutorService pool = java.util.concurrent.Executors.newFixedThreadPool(8);
+        java.util.concurrent.CompletionService<CheckedDns> completed =
+                new java.util.concurrent.ExecutorCompletionService<>(pool);
+        java.util.Set<ProbeControl> controls = java.util.concurrent.ConcurrentHashMap.newKeySet();
+        List<ResolverStore.Entry> working = new ArrayList<>();
+        long deadline = now() + DNS_BUDGET_MS;
+        int checked = 0;
+        long nextProgress = 0;
+        try {
+            for (ResolverStore.Entry entry : all) {
+                completed.submit(() -> {
+                    try (ProbeControl control = new ProbeControl(6000)) {
+                        controls.add(control);
+                        try {
+                            control.enter();
+                            DohClient.Result result = DohClient.query(entry.url,
+                                    DohClient.makeTestQuery("example.com"));
+                            ProbeControl.check();
+                            return new CheckedDns(entry, result);
+                        } finally {
+                            controls.remove(control);
+                        }
+                    } catch (java.io.IOException e) {
+                        return new CheckedDns(entry, new DohClient.Result(null, 6000, -1, "", e.getMessage()));
+                    }
+                });
+            }
+            while (checked < all.size() && now() < deadline) {
+                network.check();
+                if (now() >= nextProgress) {
+                    progress(listener, "DNS " + checked + "/" + all.size()
+                            + " • working " + working.size() + " • remaining "
+                            + Math.max(0, (deadline - now()) / 1000) + " s");
+                    nextProgress = now() + 1000;
+                }
+                java.util.concurrent.Future<CheckedDns> future = completed.poll(200,
+                        java.util.concurrent.TimeUnit.MILLISECONDS);
+                if (future == null) continue;
+                CheckedDns test = future.get();
+                network.check();
+                checked++;
+                ResolverStore.saveResult(prefs, test.entry.url, test.entry.name, test.result);
+                if (test.result.ok()) {
+                    test.entry.latencyMs = test.result.latencyMs;
+                    working.add(test.entry);
+                }
+            }
+            progress(listener, "DNS finished: " + checked + "/" + all.size()
+                    + " • working " + working.size() + " • untested " + (all.size() - checked));
+            return working;
+        } finally {
+            pool.shutdownNow();
+            for (ProbeControl control : controls) control.cancel();
+        }
+    }
 
-        for (int i = 0; i < 3; i++) {
-            DohClient.Result result =
-                    DohClient.query(
-                            entry.url,
-                            DohClient.makeTestQuery("example.com")
-                    );
-
-            if (result.ok()) {
-                success++;
-                latencies.add(result.latencyMs);
-                method = result.method == null
-                        ? method
-                        : result.method;
-            } else {
-                error = result.error == null
-                        ? "failed"
-                        : result.error;
+    private static YoutubeProbe.Result probe(java.util.concurrent.ExecutorService worker,
+            TestNetwork network, long deadline, Listener listener, String label,
+            String url) throws Exception {
+        long remaining = deadline - now();
+        if (remaining <= 0) throw new java.util.concurrent.TimeoutException("DPI time limit");
+        long probeDeadline = now() + Math.min(24_000, remaining);
+        try (ProbeControl control = new ProbeControl(Math.min(24_000, remaining))) {
+            java.util.concurrent.Future<YoutubeProbe.Result> future = worker.submit(() -> {
+                try {
+                    control.enter();
+                    YoutubeProbe.Result result = YoutubeProbe.throughByeDpi(url);
+                    ProbeControl.check();
+                    return result;
+                } finally {
+                    control.close();
+                }
+            });
+            long nextProgress = 0;
+            try {
+                while (now() < probeDeadline) {
+                    network.check();
+                    if (now() >= nextProgress) {
+                        progress(listener, label + " • remaining "
+                                + Math.max(0, (deadline - now()) / 1000) + " s");
+                        nextProgress = now() + 1000;
+                    }
+                    try {
+                        return future.get(200, java.util.concurrent.TimeUnit.MILLISECONDS);
+                    } catch (java.util.concurrent.TimeoutException waiting) {
+                        // Poll to keep cancellation and network changes responsive.
+                    }
+                }
+                throw new java.util.concurrent.TimeoutException("DPI time limit");
+            } finally {
+                control.cancel();
+                future.cancel(true);
             }
         }
-
-        long median = 0;
-
-        if (!latencies.isEmpty()) {
-            Collections.sort(latencies);
-            median =
-                    latencies.get(latencies.size() / 2);
-        }
-
-        ResolverStore.saveBenchmark(
-                prefs,
-                entry.url,
-                entry.name,
-                3,
-                success,
-                median,
-                method,
-                error
-        );
     }
 
     private static void progress(
