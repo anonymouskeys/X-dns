@@ -1,8 +1,8 @@
-name: Build X-dns universal APK
+name: Build signed X-dns Debug APK
 
 on:
   push:
-    branches: [ "main" ]
+    branches: [ "main", "fix/**" ]
   workflow_dispatch:
 
 permissions:
@@ -149,11 +149,20 @@ jobs:
 
           cp \
             app/build/outputs/apk/debug/app-debug.apk \
-            dist/X-dns-universal-v0.6.2.apk
+            dist/X-dns-debug.apk
+
+      - name: Verify debug signature and package
+        shell: bash
+        run: |
+          set -euo pipefail
+          TOOLS="$(find "$ANDROID_HOME/build-tools" -mindepth 1 -maxdepth 1 -type d | sort -V | tail -n 1)"
+          "$TOOLS/apksigner" verify --verbose --print-certs dist/X-dns-debug.apk
+          "$TOOLS/aapt" dump badging dist/X-dns-debug.apk > package.txt
+          grep -F "name='com.anonymouskeys.xdns.debug'" package.txt
 
       - name: Upload universal APK
         uses: actions/upload-artifact@v4
         with:
-          name: X-dns-universal-v0.6.2
-          path: dist/X-dns-universal-v0.6.2.apk
+          name: X-dns-debug
+          path: dist/X-dns-debug.apk
           if-no-files-found: error
